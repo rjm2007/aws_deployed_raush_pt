@@ -13,7 +13,6 @@ from app.core.config import (
 from app.core.logger import logger
 from app.services.supabase_service import (
     supabase_update_lead,
-    supabase_update_appointment,
     supabase_insert_scheduled_callback,
     _insert_call_log,
 )
@@ -145,95 +144,6 @@ async def update_lead_status(request: Request):
         return build_vapi_response(
             locals().get("tool_call_id"),
             "Sorry, there was an error updating the lead. Please try again."
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT: UPDATE REMINDER OUTCOME (Agent 2)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.post("/update-reminder-outcome")
-async def update_reminder_outcome(request: Request):
-    """
-    Called by VAPI Reminder Agent at end of call.
-    Updates the appointment record + optionally the lead record in Supabase.
-    """
-    try:
-        rid  = str(uuid4())[:8]
-        body = await request.json()
-        logger.info("[%s] ======== update-reminder-outcome START ========", rid)
-        logger.info("[%s] update-reminder-outcome body=%s", rid, body)
-
-        tool_call_id = None
-        if "message" in body and "toolCalls" in body["message"]:
-            tc           = body["message"]["toolCalls"][0]
-            tool_call_id = tc.get("id")
-            args         = tc["function"]["arguments"]
-        else:
-            args = body
-
-        appointment_id = args.get("appointment_id")
-        outcome        = args.get("outcome")
-        notes          = args.get("notes")
-        lead_id        = args.get("lead_id")
-        reminder_type  = args.get("reminder_type", "24hr")  # "24hr" or "2hr"
-
-        if not appointment_id:
-            return build_vapi_response(tool_call_id, "Missing appointment_id. Cannot update reminder outcome.")
-
-        valid_outcomes = {"confirmed", "cancelled", "rescheduled", "no_answer"}
-        if not outcome or outcome.lower() not in valid_outcomes:
-            return build_vapi_response(
-                tool_call_id,
-                f"Invalid outcome '{outcome}'. Must be one of: {', '.join(sorted(valid_outcomes))}."
-            )
-        outcome = outcome.lower()
-
-        # ── Build appointment update payload ──
-        outcome_col = "reminder_24hr_outcome" if reminder_type == "24hr" else "reminder_2hr_outcome"
-        appt_update: dict = {
-            outcome_col:  outcome,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-
-        status_map = {
-            "confirmed":   "confirmed",
-            "cancelled":   "cancelled",
-            "rescheduled": "rescheduled",
-            "no_answer":   "scheduled",
-        }
-        appt_update["status"] = status_map[outcome]
-        if outcome == "cancelled":
-            appt_update["cancelled_at"] = datetime.utcnow().isoformat()
-
-        success = await supabase_update_appointment(appointment_id, appt_update)
-
-        if success:
-            msg = f"Reminder outcome recorded: {outcome}. Appointment status updated to {appt_update['status']}."
-            logger.info("[%s] update-reminder-outcome success appt_id=%s outcome=%s",
-                        rid, appointment_id, outcome)
-        else:
-            msg = "Failed to update appointment record. Please check logs."
-            logger.error("[%s] update-reminder-outcome failed appt_id=%s", rid, appointment_id)
-
-        # ── Optionally update lead ──
-        if lead_id and success:
-            lead_update = {"updated_at": datetime.utcnow().isoformat()}
-            if outcome == "cancelled":
-                lead_update["lead_outcome"] = "not_interested"
-                lead_update["queue_status"] = "not_interested"
-            elif outcome == "confirmed":
-                lead_update["lead_outcome"] = "booked"
-            await supabase_update_lead(lead_id, lead_update)
-            logger.info("[%s] lead also updated lead_id=%s", rid, lead_id)
-
-        return build_vapi_response(tool_call_id, msg)
-
-    except Exception as e:
-        logger.exception("Error in /update-reminder-outcome: %s", e)
-        return build_vapi_response(
-            locals().get("tool_call_id"),
-            "Sorry, there was an error updating the reminder outcome. Please try again."
         )
 
 
