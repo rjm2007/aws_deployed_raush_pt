@@ -11,6 +11,7 @@ from app.core.config import (
     VAPI_REMINDER_ASSISTANT_ID,
 )
 from app.core.logger import logger
+from app.models.requests import UpdateLeadStatusRequest
 from app.services.supabase_service import (
     supabase_update_lead,
     supabase_insert_scheduled_callback,
@@ -18,14 +19,23 @@ from app.services.supabase_service import (
 )
 from app.utils.parser import build_vapi_response
 
-router = APIRouter()
+router = APIRouter(tags=["Leads"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT: UPDATE LEAD STATUS (Agent 1)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/update-lead-status")
+@router.post(
+    "/update-lead-status",
+    summary="Update lead record with call outcome",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": UpdateLeadStatusRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
 async def update_lead_status(request: Request):
     """
     Called by VAPI at the end of an outbound new lead call.
@@ -151,7 +161,7 @@ async def update_lead_status(request: Request):
 # ENDPOINT: VAPI WEBHOOK (end-of-call fallback)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/vapi-webhook")
+@router.post("/vapi-webhook", summary="VAPI end-of-call webhook (fallback lead updater)")
 async def vapi_webhook(request: Request):
     """
     Receives VAPI server events (end-of-call-report, etc.).

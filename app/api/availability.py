@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import resolve_location
 from app.core.logger import logger
+from app.models.requests import CheckAvailabilityRequest
 from app.services.tebra_service import call_tebra_get_appointments
 from app.utils.time_utils import (
     parse_booked_slots,
@@ -19,10 +20,19 @@ from app.utils.time_utils import (
 )
 from app.utils.parser import build_vapi_response
 
-router = APIRouter()
+router = APIRouter(tags=["Availability"])
 
 
-@router.post("/check-availability")
+@router.post(
+    "/check-availability",
+    summary="Check available appointment slots for a given date and location",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": CheckAvailabilityRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
 async def check_availability(request: Request):
     try:
         rid  = str(uuid4())[:8]

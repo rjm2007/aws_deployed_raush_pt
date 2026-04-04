@@ -6,6 +6,13 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Request
 
+from app.models.requests import (
+    CreateAppointmentRequest,
+    UpdateAppointmentStatusRequest,
+    RescheduleAppointmentRequest,
+    ConfirmAppointmentRequest,
+)
+
 from app.core.config import (
     resolve_location,
     resolve_appointment_reason_id,
@@ -38,14 +45,23 @@ from app.utils.time_utils import (
 )
 from app.utils.parser import build_vapi_response
 
-router = APIRouter()
+router = APIRouter(tags=["Appointments"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT: CREATE APPOINTMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/create-appointment")
+@router.post(
+    "/create-appointment",
+    summary="Create a new appointment in Tebra + Supabase",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": CreateAppointmentRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
 async def create_appointment(request: Request):
     try:
         rid  = str(uuid4())[:8]
@@ -256,7 +272,16 @@ async def create_appointment(request: Request):
 # ENDPOINT: UPDATE APPOINTMENT STATUS IN TEBRA (Agent 2)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/update-appointment-status")
+@router.post(
+    "/update-appointment-status",
+    summary="Update appointment status in Tebra (Confirmed / Cancelled / etc.)",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": UpdateAppointmentStatusRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
 async def update_appointment_status(request: Request):
     try:
         rid  = str(uuid4())[:8]
@@ -342,7 +367,16 @@ async def update_appointment_status(request: Request):
 # ENDPOINT: RESCHEDULE APPOINTMENT (Agent 2)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/reschedule-appointment")
+@router.post(
+    "/reschedule-appointment",
+    summary="Reschedule an existing appointment (mark old as Rescheduled, create new)",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": RescheduleAppointmentRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
 async def reschedule_appointment(request: Request):
     try:
         rid  = str(uuid4())[:8]
@@ -545,7 +579,16 @@ async def reschedule_appointment(request: Request):
 #           + update_reminder_outcome for confirm/cancel flows)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/confirm-appointment")
+@router.post(
+    "/confirm-appointment",
+    summary="Confirm or cancel appointment (merged Tebra + Supabase in parallel)",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": ConfirmAppointmentRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
 async def confirm_appointment(request: Request):
     """
     Merged endpoint for the Reminder Agent confirm / cancel flow.
