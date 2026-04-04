@@ -147,9 +147,13 @@ async def create_appointment(request: Request):
         logger.info("[%s]   lead_id      : %s", rid, lead_id)
         logger.info("[%s] ────────────────────────────────────────────────────────", rid)
 
-        # ── Step 1: Find or create patient ──
-        logger.info("[%s] STEP 1 → GetPatients (looking up %s %s)", rid, first_name, last_name)
-        patient_id = await get_patient_by_name(first_name, last_name, rid)
+        # ── Steps 1 + 1c in parallel: GetPatients + GetAppointments simultaneously ──
+        logger.info("[%s] STEP 1+1c → GetPatients + GetAppointments in parallel", rid)
+        patient_id, pre_xml = await asyncio.gather(
+            get_patient_by_name(first_name, last_name, rid),
+            call_tebra_get_appointments(date, tebra_name),
+        )
+
         if patient_id:
             logger.info("[%s] STEP 1 RESULT → Patient EXISTS in Tebra | patientId=%s", rid, patient_id)
         else:
@@ -165,12 +169,45 @@ async def create_appointment(request: Request):
                 )
             logger.info("[%s] STEP 1b RESULT → CreatePatient SUCCESS | patientId=%s", rid, patient_id)
 
-        # ── Step 1c: Server-side slot guard ──
+        # ── Step 1c: Server-side slot guard (uses pre_xml already fetched above) ──
         logger.info("[%s] STEP 1c → Slot pre-check date=%s time=%s location=%s", rid, date, time_str, tebra_name)
-        pre_xml = await call_tebra_get_appointments(date, tebra_name)
         if "<IsError>true</IsError>" not in pre_xml:
             booked_now = parse_booked_slots(pre_xml, date)
             if (parsed_time[0], parsed_time[1]) in booked_now:
+                # ── Idempotency: VAPI retry after ECONNRESET may hit this path even though
+                #    the appointment was already booked by a previous request. Check Supabase
+                #    for an existing scheduled appointment for this lead at the exact same slot.
+                if lead_id:
+                    try:
+                        async with httpx.AsyncClient(timeout=8.0) as _client:
+                            _r = await _client.get(
+                                f"{SUPABASE_URL}/rest/v1/appointments"
+                                f"?lead_id=eq.{lead_id}"
+                                f"&appointment_date=eq.{date}"
+                                f"&appointment_time=eq.{time_normalized}"
+                                f"&status=eq.scheduled"
+                                f"&select=id,tebra_appointment_id",
+                                headers=SUPABASE_HEADERS,
+                            )
+                            if _r.status_code == 200 and _r.json():
+                                existing       = _r.json()[0]
+                                existing_sb_id = existing["id"]
+                                existing_tebra = existing["tebra_appointment_id"]
+                                logger.info(
+                                    "[%s] STEP 1c IDEMPOTENT: slot conflict but lead already has "
+                                    "scheduled appt sb=%s tebra=%s — returning success",
+                                    rid, existing_sb_id, existing_tebra,
+                                )
+                                return build_vapi_response(
+                                    tool_call_id,
+                                    f"Appointment booked successfully! "
+                                    f"{name} is scheduled for {service} at {location} "
+                                    f"on {date} at {format_12hr(parsed_time[0], parsed_time[1])}. "
+                                    f"appointment_id:{existing_sb_id} tebra_id:{existing_tebra}",
+                                )
+                    except Exception as _e:
+                        logger.error("[%s] STEP 1c idempotency check error: %s", rid, _e)
+
                 available_now = get_available_slots(booked_now)
                 nearest       = get_nearest_available_slots(parsed_time[0], parsed_time[1], available_now)
                 slots_str     = ", ".join(nearest) if nearest else "no other slots today"
