@@ -11,6 +11,7 @@ from app.models.requests import (
     UpdateAppointmentStatusRequest,
     RescheduleAppointmentRequest,
     ConfirmAppointmentRequest,
+    CancelAppointmentRequest,
 )
 
 from app.core.config import (
@@ -304,8 +305,14 @@ async def update_appointment_status(request: Request):
         if not tebra_appt_id:
             return build_vapi_response(tool_call_id, "Missing tebra_appointment_id.")
 
+        if new_status == "Cancelled":
+            return build_vapi_response(
+                tool_call_id,
+                "Use the cancel_appointment tool to cancel appointments — it handles all required updates correctly."
+            )
+
         valid_statuses = {
-            "Confirmed", "Cancelled", "NoShow", "Rescheduled",
+            "Confirmed", "NoShow", "Rescheduled",
             "Scheduled", "CheckedIn", "CheckedOut", "NeedsReschedule",
         }
         if not new_status or new_status not in valid_statuses:
@@ -696,4 +703,123 @@ async def confirm_appointment(request: Request):
         return build_vapi_response(
             locals().get("tool_call_id"),
             "Sorry, there was an error confirming the appointment. Please try again."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINT: CANCEL APPOINTMENT
+# (Tebra → Cancelled, Supabase appointment → cancelled, Lead → not_interested)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/cancel-appointment",
+    summary="Cancel an appointment (Tebra + Supabase + Lead update in parallel)",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": CancelAppointmentRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
+async def cancel_appointment(request: Request):
+    """
+    Cancels an appointment end-to-end:
+      1. Tebra — marks appointment as Cancelled via GetAppointment → UpdateAppointment
+      2. Supabase appointments — status='cancelled', cancelled_at=now()
+      3. Supabase leads — lead_outcome='not_interested', queue_status='not_interested'
+
+    All three updates run in parallel.
+    """
+    try:
+        rid  = str(uuid4())[:8]
+        body = await request.json()
+        logger.info("[%s] ======== cancel-appointment START ========", rid)
+        logger.info("[%s] cancel-appointment body=%s", rid, body)
+
+        tool_call_id = None
+        if "message" in body and "toolCalls" in body["message"]:
+            tc           = body["message"]["toolCalls"][0]
+            tool_call_id = tc.get("id")
+            args         = tc["function"]["arguments"]
+        else:
+            args = body
+
+        tebra_appt_id  = args.get("tebra_appointment_id")
+        appointment_id = args.get("appointment_id")
+        lead_id        = args.get("lead_id")
+        notes          = args.get("notes")
+
+        if not tebra_appt_id:
+            return build_vapi_response(tool_call_id, "Missing tebra_appointment_id.")
+        if not appointment_id:
+            return build_vapi_response(tool_call_id, "Missing appointment_id.")
+
+        now_iso = datetime.utcnow().isoformat()
+
+        # ── Supabase appointment payload ──
+        appt_payload: dict = {
+            "status":       "cancelled",
+            "cancelled_at": now_iso,
+            "updated_at":   now_iso,
+        }
+        if notes:
+            appt_payload["reminder_notes"] = notes
+
+        # ── Helper: Tebra cancel (Get → Update) ──
+        async def _tebra_cancel() -> str:
+            appt_data = await call_tebra_get_appointment(tebra_appt_id, rid)
+            if not appt_data:
+                return f"Could not fetch appointment {tebra_appt_id} from Tebra."
+            appt_data["AppointmentStatus"] = "Cancelled"
+            result = await call_tebra_update_appointment(appt_data, rid)
+            if result["success"]:
+                logger.info("[%s] Tebra cancelled appt %s", rid, tebra_appt_id)
+                return "ok"
+            logger.error("[%s] Tebra cancel FAILED: %s", rid, result["error"])
+            return f"Tebra cancel failed: {result['error']}"
+
+        # ── Helper: Lead update ──
+        async def _lead_update() -> bool:
+            if not lead_id:
+                return True
+            return await supabase_update_lead(lead_id, {
+                "lead_outcome":  "not_interested",
+                "queue_status":  "not_interested",
+                "updated_at":    now_iso,
+            })
+
+        # ── Run Tebra + Supabase appointment + Lead update in parallel ──
+        tebra_result, sb_ok, lead_ok = await asyncio.gather(
+            _tebra_cancel(),
+            supabase_update_appointment(appointment_id, appt_payload),
+            _lead_update(),
+        )
+
+        tebra_ok = tebra_result == "ok"
+
+        # ── Build response message ──
+        parts = []
+        if tebra_ok:
+            parts.append("Tebra: cancelled")
+        else:
+            parts.append(f"Tebra: {tebra_result}")
+        parts.append(f"Supabase appointment: {'updated' if sb_ok else 'FAILED'}")
+        if lead_id:
+            parts.append(f"Lead: {'updated to not_interested' if lead_ok else 'FAILED'}")
+
+        if tebra_ok and sb_ok and lead_ok:
+            msg = "Appointment cancelled successfully. All records updated."
+        else:
+            msg = "Appointment cancellation partial. " + " | ".join(parts)
+
+        logger.info("[%s] cancel-appointment DONE tebra=%s sb=%s lead=%s",
+                    rid, tebra_ok, sb_ok, lead_ok)
+
+        return build_vapi_response(tool_call_id, msg)
+
+    except Exception as e:
+        logger.exception("Error in /cancel-appointment: %s", e)
+        return build_vapi_response(
+            locals().get("tool_call_id"),
+            "Sorry, there was an error cancelling the appointment. Please try again."
         )

@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 
 class AppointmentStatus(str, Enum):
     Confirmed       = "Confirmed"
-    Cancelled       = "Cancelled"
     NoShow          = "NoShow"
     Rescheduled     = "Rescheduled"
     Scheduled       = "Scheduled"
@@ -104,6 +103,13 @@ class ConfirmAppointmentRequest(BaseModel):
     lead_id: Optional[str] = Field(None, description="Supabase lead UUID")
     notes: Optional[str] = Field(None, example="Patient confirmed appointment.", description="Call summary")
     reminder_type: ReminderType = Field(ReminderType.hr24, description="'24hr' or '2hr'")
+
+
+class CancelAppointmentRequest(BaseModel):
+    tebra_appointment_id: str = Field(..., example="33463", description="Tebra appointment ID")
+    appointment_id: str = Field(..., description="Supabase appointment UUID")
+    lead_id: Optional[str] = Field(None, description="Supabase lead UUID (updates lead to not_interested)")
+    notes: Optional[str] = Field(None, example="Patient requested cancellation.", description="Cancellation reason / notes")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
