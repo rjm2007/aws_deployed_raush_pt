@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+*.venv
+.env
+.venv
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Credentials and secrets
+.env*
+*.env
+secrets.*
+*.sqlite3
+*.db
+*.pkl
+*.key
+*.pem
+*.crt
+*.csr
+*.der
+*.jks
+*.p12
+*.pfx
+*.bak
+
+# Ignore local config
+config.yaml
+config.yml
+
+# Ignore test outputs
+htmlcov/
+.coverage
+*.cover
+*.py,cover
+
+# Ignore Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Ignore system files
+*.swp
+*.swo
+*.tmp
+
+# Ignore build outputs
+dist/
+build/
+*.egg-info/
+
+# Ignore logs
+*.log
+logs/
+
+# Ignore node_modules (if any JS tooling)
+node_modules/
