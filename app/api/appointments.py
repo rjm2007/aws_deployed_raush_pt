@@ -110,6 +110,16 @@ async def create_appointment(request: Request):
                 f"You said '{date}' — could you give me the exact date?"
             )
 
+        # ── Block Sundays — clinic is closed ──
+        requested_date = datetime.strptime(date, "%Y-%m-%d")
+        if requested_date.weekday() == 6:  # Sunday
+            logger.info("[%s] create-appointment BLOCKED — %s is a Sunday", rid, date)
+            return build_vapi_response(
+                tool_call_id,
+                f"Sorry, {date} is a Sunday and the clinic is closed. "
+                f"We are open Monday through Saturday. Please choose a different date."
+            )
+
         # ── Validate time format ──
         parsed_time = parse_time_to_24hr(time_str)
         if not parsed_time:
@@ -462,6 +472,16 @@ async def reschedule_appointment(request: Request):
             return build_vapi_response(
                 tool_call_id,
                 f"I need the date in YYYY-MM-DD format. You said '{new_date}'."
+            )
+
+        # ── Block Sundays — clinic is closed ──
+        requested_date = datetime.strptime(new_date, "%Y-%m-%d")
+        if requested_date.weekday() == 6:  # Sunday
+            logger.info("[%s] reschedule-appointment BLOCKED — %s is a Sunday", rid, new_date)
+            return build_vapi_response(
+                tool_call_id,
+                f"Sorry, {new_date} is a Sunday and the clinic is closed. "
+                f"We are open Monday through Saturday. Please choose a different date."
             )
 
         # ── Validate time format ──

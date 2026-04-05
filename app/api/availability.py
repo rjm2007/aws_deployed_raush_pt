@@ -69,6 +69,16 @@ async def check_availability(request: Request):
             logger.warning("[%s] check-availability invalid date format: %s", rid, date)
             return build_vapi_response(tool_call_id, message)
 
+        # ── Block Sundays — clinic is closed ──
+        requested_date = datetime.strptime(date, "%Y-%m-%d")
+        if requested_date.weekday() == 6:  # Sunday
+            logger.info("[%s] check-availability BLOCKED — %s is a Sunday", rid, date)
+            return build_vapi_response(
+                tool_call_id,
+                f"Sorry, {date} is a Sunday and the clinic is closed. "
+                f"We are open Monday through Saturday. Would you like to check another date?"
+            )
+
         xml_response = await call_tebra_get_appointments(date, tebra_name)
 
         # ── Detect Tebra-level error ──

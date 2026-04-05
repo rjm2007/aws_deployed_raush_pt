@@ -68,3 +68,5 @@ logs/
 
 # Ignore node_modules (if any JS tooling)
 node_modules/
+
+Deployment_steps.md 
