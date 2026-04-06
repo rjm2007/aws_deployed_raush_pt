@@ -17,6 +17,7 @@ from app.utils.time_utils import (
     is_valid_clinic_slot,
     format_12hr,
     get_nearest_available_slots,
+    format_location_hours,
 )
 from app.utils.parser import build_vapi_response
 
@@ -92,7 +93,7 @@ async def check_availability(request: Request):
             )
 
         booked    = parse_booked_slots(xml_response, date)
-        available = get_available_slots(booked)
+        available = get_available_slots(booked, date, location)
 
         # ── Filter out past slots when date is today (PDT) ──
         pdt_now = datetime.now(timezone(timedelta(hours=-7)))
@@ -115,10 +116,10 @@ async def check_availability(request: Request):
                 )
         else:
             h, mn = requested_time
-            if not is_valid_clinic_slot(h, mn):
+            if not is_valid_clinic_slot(date, location, h, mn):
                 message = (
                     f"Sorry, {format_12hr(h, mn)} is outside clinic hours. "
-                    f"We're open 7:00 AM to 2:00 PM and 3:00 PM to 5:30 PM."
+                    f"We're open {format_location_hours(date, location)}."
                 )
             elif (h, mn) not in booked:
                 message = (

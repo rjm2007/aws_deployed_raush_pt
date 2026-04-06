@@ -4,6 +4,67 @@ from datetime import datetime, timezone
 from app.core.config import CLINIC_TZ_OFFSET
 
 
+def _minutes(h: int, mn: int) -> int:
+    return h * 60 + mn
+
+
+def _format_hhmm(total_minutes: int) -> str:
+    h = total_minutes // 60
+    mn = total_minutes % 60
+    return f"{h:02d}:{mn:02d}"
+
+
+def get_location_hours(date_yyyy_mm_dd: str, location: str) -> tuple[int, int] | None:
+    """
+    Returns (start_minutes, end_minutes) for the clinic's working hours on the given date,
+    or None if the clinic is closed that day.
+
+    Times are local clinic time (America/Los_Angeles). Slots are 30-minute intervals.
+
+    Source: clinic hours image provided by user (Apr 2026).
+    """
+    loc = (location or "").strip()
+    try:
+        weekday = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").weekday()
+    except Exception:
+        return None
+
+    # Closed Sundays for all locations
+    if weekday == 6:
+        return None
+
+    # Laguna Niguel
+    if loc == "Laguna Niguel":
+        if weekday <= 4:
+            return (_minutes(7, 0), _minutes(19, 0))
+        return (_minutes(7, 0), _minutes(13, 30))
+
+    # Dana Point
+    if loc == "Dana Point":
+        if weekday <= 4:
+            return (_minutes(7, 0), _minutes(19, 0))
+        return (_minutes(7, 0), _minutes(13, 30))
+
+    # Mission Viejo
+    if loc == "Mission Viejo":
+        if weekday <= 4:
+            return (_minutes(7, 0), _minutes(17, 0))
+        return None
+
+    # Fort Fitness - Laguna Hills
+    if loc == "Fort Fitness - Laguna Hills":
+        if weekday <= 3:
+            return (_minutes(8, 0), _minutes(17, 0))
+        if weekday in (4, 5):
+            return (_minutes(8, 0), _minutes(13, 0))
+        return None
+
+    # Unknown location: safe default Mon–Sat 7–5
+    if weekday <= 5:
+        return (_minutes(7, 0), _minutes(17, 0))
+    return None
+
+
 def parse_time_to_24hr(time_str: str):
     """Parse any time string to (hour, minute) tuple in 24-hr format. Returns None if unparseable."""
     if not time_str:
@@ -55,14 +116,20 @@ def to_utc_string(date: str, h: int, mn: int) -> str:
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def generate_all_slots() -> list:
-    """Return all valid 30-minute booking slots for a clinic day."""
-    slots = []
-    for h in range(7, 18):  # 7 AM to 5:30 PM last slot
-        if h == 14:  # skip 2 PM–3 PM lunch
-            continue
-        for mn in [0, 30]:
-            slots.append((h, mn))
+def generate_all_slots(date_yyyy_mm_dd: str, location: str) -> list[tuple[int, int]]:
+    """Return all valid 30-minute booking slots for a clinic day and location."""
+    hours = get_location_hours(date_yyyy_mm_dd, location)
+    if not hours:
+        return []
+    start_min, end_min = hours
+
+    slots: list[tuple[int, int]] = []
+    t = start_min
+    while t + 30 <= end_min:
+        h = t // 60
+        mn = t % 60
+        slots.append((h, mn))
+        t += 30
     return slots
 
 
@@ -109,9 +176,9 @@ def parse_booked_slots(xml: str, target_date: str) -> set:
     return booked
 
 
-def get_available_slots(booked: set) -> list:
-    """Return all slots not in the booked set."""
-    return [s for s in generate_all_slots() if s not in booked]
+def get_available_slots(booked: set, date_yyyy_mm_dd: str, location: str) -> list:
+    """Return all slots not in the booked set, constrained by location working hours."""
+    return [s for s in generate_all_slots(date_yyyy_mm_dd, location) if s not in booked]
 
 
 def get_free_ranges(available: list) -> list:
@@ -143,6 +210,22 @@ def get_nearest_available_slots(requested_h: int, requested_mn: int,
     return [format_12hr(h, mn) for h, mn in nearest]
 
 
-def is_valid_clinic_slot(h: int, mn: int) -> bool:
-    """Return True if the slot falls within open clinic hours (7 AM–6 PM, no 2–3 PM)."""
-    return 7 <= h < 18 and h != 14
+def is_valid_clinic_slot(date_yyyy_mm_dd: str, location: str, h: int, mn: int) -> bool:
+    """Return True if the slot falls within open clinic hours for that location/date."""
+    hours = get_location_hours(date_yyyy_mm_dd, location)
+    if not hours:
+        return False
+    start_min, end_min = hours
+    t = _minutes(h, mn)
+    return (t >= start_min) and (t + 30 <= end_min) and (t % 30 == 0)
+
+
+def format_location_hours(date_yyyy_mm_dd: str, location: str) -> str:
+    """Human-readable hours string for error messages."""
+    hours = get_location_hours(date_yyyy_mm_dd, location)
+    if not hours:
+        return "closed"
+    start_min, end_min = hours
+    sh, sm = start_min // 60, start_min % 60
+    eh, em = end_min // 60, end_min % 60
+    return f"{format_12hr(sh, sm)} to {format_12hr(eh, em)}"

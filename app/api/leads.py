@@ -240,7 +240,7 @@ async def vapi_webhook(request: Request):
         old_attempts = lead.get("call_attempts") or 0
         new_attempts = old_attempts + 1
 
-        if ended_reason == "customer-did-not-answer":
+        if ended_reason in ("customer-did-not-answer", "silence-timed-out"):
             queue_status = "in_progress" if new_attempts < 3 else "manual_follow_up"
             lead_outcome = "no_answer"
         elif ended_reason in ("customer-ended-call", "assistant-ended-call"):
@@ -256,7 +256,7 @@ async def vapi_webhook(request: Request):
             "call_attempts":  new_attempts,
             "last_called_at": datetime.utcnow().isoformat(),
             "updated_at":     datetime.utcnow().isoformat(),
-            "notes": f"[auto-fallback] {ended_reason}. {summary[:200]}" if summary else f"[auto-fallback] {ended_reason}",
+            "notes": f"[auto-fallback] {ended_reason}. {summary}" if summary else f"[auto-fallback] {ended_reason}",
         }
 
         success = await supabase_update_lead(lead_id, update_data)
@@ -272,7 +272,7 @@ async def vapi_webhook(request: Request):
             call_type=call_type_log,
             call_direction="outbound",
             outcome=lead_outcome,
-            notes=summary[:500] if summary else f"[auto-fallback] {ended_reason}",
+            notes=summary if summary else f"[auto-fallback] {ended_reason}",
         )
 
         return JSONResponse(content={"ok": True})

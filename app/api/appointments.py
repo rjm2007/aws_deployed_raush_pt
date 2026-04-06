@@ -44,6 +44,8 @@ from app.utils.time_utils import (
     parse_booked_slots,
     get_available_slots,
     get_nearest_available_slots,
+    is_valid_clinic_slot,
+    format_location_hours,
 )
 from app.utils.parser import build_vapi_response
 
@@ -146,6 +148,14 @@ async def create_appointment(request: Request):
                 f"Could not resolve location '{location}'. Please provide a valid clinic location."
             )
 
+        # ── Validate clinic working hours for this location/date ──
+        if not is_valid_clinic_slot(date, location, parsed_time[0], parsed_time[1]):
+            return build_vapi_response(
+                tool_call_id,
+                f"Sorry, {format_12hr(parsed_time[0], parsed_time[1])} is outside clinic hours for {location} on {date}. "
+                f"We're open {format_location_hours(date, location)}."
+            )
+
         reason_id = resolve_appointment_reason_id(service)
         logger.info("[%s] ── INPUT SUMMARY ──────────────────────────────────────", rid)
         logger.info("[%s]   tool_call_id : %s", rid, tool_call_id)
@@ -219,7 +229,7 @@ async def create_appointment(request: Request):
                     except Exception as _e:
                         logger.error("[%s] STEP 1c idempotency check error: %s", rid, _e)
 
-                available_now = get_available_slots(booked_now)
+                available_now = get_available_slots(booked_now, date, location)
                 nearest       = get_nearest_available_slots(parsed_time[0], parsed_time[1], available_now)
                 slots_str     = ", ".join(nearest) if nearest else "no other slots today"
                 logger.warning("[%s] STEP 1c SLOT CONFLICT: %s is already booked at %s. Nearest: %s",
@@ -537,7 +547,7 @@ async def reschedule_appointment(request: Request):
             if "<IsError>true</IsError>" not in pre_xml:
                 booked_new    = parse_booked_slots(pre_xml, new_date)
                 if (parsed_time[0], parsed_time[1]) in booked_new:
-                    available_new = get_available_slots(booked_new)
+                    available_new = get_available_slots(booked_new, new_date, new_location or "")
                     nearest_new   = get_nearest_available_slots(parsed_time[0], parsed_time[1], available_new)
                     slots_str     = ", ".join(nearest_new) if nearest_new else "no open slots that day"
                     logger.warning("[%s] Reschedule slot conflict: %s is booked. Nearest: %s",
