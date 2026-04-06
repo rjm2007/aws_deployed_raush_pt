@@ -1,3 +1,4 @@
+import re
 import httpx
 from datetime import datetime
 
@@ -42,6 +43,109 @@ async def supabase_update_lead(lead_id: str, data: dict) -> bool:
     except Exception as e:
         logger.error("[supabase] update_lead exception: %s", e)
         return False
+
+
+def _normalize_patient_name_key(name: str) -> str:
+    """Collapse whitespace, strip, lower — for exact (case-insensitive) name match."""
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def _sb_row_time_hm(raw) -> tuple[int, int] | None:
+    if raw is None:
+        return None
+    ts = str(raw).strip()
+    if not ts:
+        return None
+    seg = ts.split(":")
+    if len(seg) < 2:
+        return None
+    try:
+        return int(seg[0]), int(seg[1])
+    except ValueError:
+        return None
+
+
+async def supabase_fetch_appointments_by_patient_date_time(
+    patient_name: str,
+    appointment_date: str,
+    time_hour: int,
+    time_minute: int,
+) -> list[dict]:
+    """
+    Fetch appointments on a single calendar day (indexed by appointment_date), then keep rows where
+    patient_name matches exactly (case-insensitive, whitespace-normalized) and clock time matches.
+    Only rows with tebra_appointment_id set are returned.
+    """
+    if not patient_name or not appointment_date:
+        return []
+    name_key = _normalize_patient_name_key(patient_name)
+    if not name_key:
+        return []
+
+    params = [
+        (
+            "select",
+            "id,tebra_appointment_id,patient_name,appointment_date,appointment_time,location,service,status",
+        ),
+        ("appointment_date", f"eq.{appointment_date}"),
+        ("tebra_appointment_id", "not.is.null"),
+        (
+            "or",
+            f"(practice_id.eq.{SUPABASE_PRACTICE_ID},practice_id.is.null)",
+        ),
+        ("order", "appointment_time.asc"),
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/appointments",
+                headers=SUPABASE_HEADERS,
+                params=params,
+            )
+            if r.status_code != 200:
+                logger.error(
+                    "[supabase] fetch_appointments_by_patient_date_time failed status=%s body=%s",
+                    r.status_code,
+                    r.text[:500],
+                )
+                return []
+            rows = r.json()
+            if not isinstance(rows, list):
+                return []
+    except Exception as e:
+        logger.error("[supabase] fetch_appointments_by_patient_date_time exception: %s", e)
+        return []
+
+    out: list[dict] = []
+    for row in rows:
+        row_name_key = _normalize_patient_name_key(row.get("patient_name") or "")
+        if row_name_key != name_key:
+            continue
+        hm = _sb_row_time_hm(row.get("appointment_time"))
+        if not hm or hm[0] != time_hour or hm[1] != time_minute:
+            continue
+        out.append(row)
+    return out
+
+
+async def supabase_fetch_appointment_by_tebra_id(tebra_id: str) -> dict | None:
+    """Return one appointments row by Tebra appointment id, or None."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/appointments"
+                f"?tebra_appointment_id=eq.{tebra_id}"
+                f"&select=id,patient_name,patient_phone,service,location,lead_id",
+                headers=SUPABASE_HEADERS,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                return rows[0] if rows else None
+            logger.error("[supabase] fetch_appointment_by_tebra_id failed status=%s", r.status_code)
+            return None
+    except Exception as e:
+        logger.error("[supabase] fetch_appointment_by_tebra_id exception: %s", e)
+        return None
 
 
 async def supabase_update_appointment(appt_id: str, data: dict) -> bool:

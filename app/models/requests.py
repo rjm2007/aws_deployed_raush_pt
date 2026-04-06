@@ -86,14 +86,70 @@ class UpdateAppointmentStatusRequest(BaseModel):
     appointment_id: Optional[str] = Field(None, description="Supabase appointment UUID (also updates local DB if provided)")
 
 
+class InboundLookupAppointmentsRequest(BaseModel):
+    patient_full_name: str = Field(
+        ...,
+        example="Jane Doe",
+        description="Patient full name — must match the booked appointment (case-insensitive, whitespace normalized)",
+    )
+    date: str = Field(
+        ...,
+        example="2026-04-04",
+        description="The patient's current appointment date (YYYY-MM-DD)",
+    )
+    time: str = Field(
+        ...,
+        example="7:00 PM",
+        description="The patient's current appointment time (HH:MM 24h or natural e.g. 7 PM)",
+    )
+    timezone_offset_from_gmt: Optional[int] = Field(
+        None,
+        example=7,
+        description="Tebra fallback only: override TEBRA_TIMEZONE_OFFSET_FROM_GMT from env",
+    )
+
+
 class RescheduleAppointmentRequest(BaseModel):
-    tebra_appointment_id: str = Field(..., example="33463", description="Old Tebra appointment ID")
-    appointment_id: str = Field(..., description="Supabase appointment UUID of the old appointment")
+    tebra_appointment_id: Optional[str] = Field(
+        None,
+        example="33463",
+        description="Old Tebra appointment ID — omit if using resolve_* (current appointment name + date + time)",
+    )
+    resolve_patient_full_name: Optional[str] = Field(
+        None,
+        description="With resolve_appointment_date + resolve_appointment_time: find the appointment to reschedule (Supabase then Tebra)",
+    )
+    resolve_appointment_date: Optional[str] = Field(
+        None,
+        example="2026-04-04",
+        description="Current appointment date YYYY-MM-DD (must match resolve_patient_full_name + resolve_appointment_time)",
+    )
+    resolve_appointment_time: Optional[str] = Field(
+        None,
+        example="7:00 PM",
+        description="Current appointment time (HH:MM or natural); must resolve to exactly one booking",
+    )
+    appointment_id: Optional[str] = Field(
+        None,
+        description="Supabase UUID of the old row — optional if Tebra id exists in Supabase or for inbound-only Tebra reschedule",
+    )
     new_date: str = Field(..., example="2026-04-16", description="New date in YYYY-MM-DD format")
     new_time: str = Field(..., example="10:00", description="New time in HH:MM 24-hour format")
     location: Optional[str] = Field(None, example="Dana Point", description="New clinic location (defaults to same)")
     service: Optional[str] = Field(None, example="evaluation", description="New service name (defaults to same)")
     lead_id: Optional[str] = Field(None, description="Supabase lead UUID")
+    patient_name: Optional[str] = Field(
+        None,
+        description="When no Supabase row: stored on the new appointment row",
+    )
+    patient_phone: Optional[str] = Field(
+        None,
+        description="When no Supabase row: optional phone for the new appointment row",
+    )
+    timezone_offset_from_gmt: Optional[int] = Field(
+        None,
+        description="When using resolve_* fields: Tebra lookup timezone offset (same as inbound-lookup-appointments)",
+    )
 
 
 class ConfirmAppointmentRequest(BaseModel):

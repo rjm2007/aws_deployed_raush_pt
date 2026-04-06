@@ -66,6 +66,38 @@ def generate_all_slots() -> list:
     return slots
 
 
+def parse_tebra_local_start_datetime(raw: str) -> tuple[str, int, int] | None:
+    """Parse Tebra StartDate strings (e.g. '4/4/2026 7:00:00 PM') to (YYYY-MM-DD, hour, minute)."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        if " " in raw and "/" in raw:
+            parts = raw.split(" ")
+            if len(parts) >= 3:
+                date_parts = parts[0].split("/")
+                month, day, year = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+                tp = parts[1].split(":")
+                h = int(tp[0])
+                mn = int(tp[1])
+                ampm = parts[2].upper()
+                if ampm == "PM" and h != 12:
+                    h += 12
+                if ampm == "AM" and h == 12:
+                    h = 0
+                return (f"{year:04d}-{month:02d}-{day:02d}", h, mn)
+        if "T" in raw:
+            dt_part, tm_part = raw.split("T")
+            dp = dt_part.split("-")
+            tp = tm_part.replace("Z", "").split(":")
+            y, mo, d = int(dp[0]), int(dp[1]), int(dp[2])
+            h, mn = int(tp[0]), int(tp[1])
+            return (f"{y:04d}-{mo:02d}-{d:02d}", h, mn)
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
 def parse_booked_slots(xml: str, target_date: str) -> set:
     """Parse booked slots from Tebra XML.
     Tebra returns times in CLINIC LOCAL time (PDT/PST), NOT UTC.
