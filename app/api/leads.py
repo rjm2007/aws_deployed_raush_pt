@@ -112,6 +112,8 @@ async def update_lead_status(request: Request):
                     update_data["queue_status"] = "in_progress" if _new_att < 3 else "manual_follow_up"
         if callback_requested_at:
             update_data["callback_requested_at"] = callback_requested_at
+            # Callback → manual follow-up only; do NOT auto-schedule a robocall
+            update_data["queue_status"] = "manual_follow_up"
         if callback_notes:
             update_data["callback_notes"] = callback_notes
         if tebra_patient_id:
@@ -119,14 +121,7 @@ async def update_lead_status(request: Request):
         if notes:
             update_data["notes"]          = notes
 
-        # ── Insert scheduled callback if requested ──
-        if callback_requested_at and lead_id:
-            await supabase_insert_scheduled_callback({
-                "lead_id":        lead_id,
-                "scheduled_for":  callback_requested_at,
-                "assistant_type": "lead",
-                "notes":          callback_notes,
-            })
+        # ── Scheduled callback insert removed — callbacks are manual follow-up only ──
 
         # ── Increment call_attempts ──
         try:
@@ -237,7 +232,7 @@ async def vapi_webhook(request: Request):
                 call_type=call_type_log,
                 call_direction="outbound",
                 outcome=current_outcome or ended_reason,
-                notes=summary[:500] if summary else None,
+                notes=summary if summary else None,
             )
             return JSONResponse(content={"ok": True})
 
