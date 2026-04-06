@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import resolve_location
 from app.core.logger import logger
-from app.models.requests import CheckAvailabilityRequest
+from app.models.requests import CheckAvailabilityRequest, inline_schema_refs
 from app.services.tebra_service import call_tebra_get_appointments
 from app.utils.time_utils import (
     parse_booked_slots,
@@ -28,7 +28,7 @@ router = APIRouter(tags=["Availability"])
     summary="Check available appointment slots for a given date and location",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": CheckAvailabilityRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(CheckAvailabilityRequest.model_json_schema())}},
             "required": True,
         }
     },

@@ -12,6 +12,7 @@ from app.models.requests import (
     RescheduleAppointmentRequest,
     ConfirmAppointmentRequest,
     CancelAppointmentRequest,
+    inline_schema_refs,
 )
 
 from app.core.config import (
@@ -58,7 +59,7 @@ router = APIRouter(tags=["Appointments"])
     summary="Create a new appointment in Tebra + Supabase",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": CreateAppointmentRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(CreateAppointmentRequest.model_json_schema())}},
             "required": True,
         }
     },
@@ -325,7 +326,7 @@ async def create_appointment(request: Request):
     summary="Update appointment status in Tebra (Confirmed / Cancelled / etc.)",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": UpdateAppointmentStatusRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(UpdateAppointmentStatusRequest.model_json_schema())}},
             "required": True,
         }
     },
@@ -426,7 +427,7 @@ async def update_appointment_status(request: Request):
     summary="Reschedule an existing appointment (mark old as Rescheduled, create new)",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": RescheduleAppointmentRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(RescheduleAppointmentRequest.model_json_schema())}},
             "required": True,
         }
     },
@@ -648,7 +649,7 @@ async def reschedule_appointment(request: Request):
     summary="Confirm or cancel appointment (merged Tebra + Supabase in parallel)",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": ConfirmAppointmentRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(ConfirmAppointmentRequest.model_json_schema())}},
             "required": True,
         }
     },
@@ -773,7 +774,7 @@ async def confirm_appointment(request: Request):
     summary="Cancel an appointment (Tebra + Supabase + Lead update in parallel)",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": CancelAppointmentRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(CancelAppointmentRequest.model_json_schema())}},
             "required": True,
         }
     },

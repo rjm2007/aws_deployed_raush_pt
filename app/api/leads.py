@@ -11,7 +11,7 @@ from app.core.config import (
     VAPI_REMINDER_ASSISTANT_ID,
 )
 from app.core.logger import logger
-from app.models.requests import UpdateLeadStatusRequest
+from app.models.requests import UpdateLeadStatusRequest, inline_schema_refs
 from app.services.supabase_service import (
     supabase_update_lead,
     supabase_insert_scheduled_callback,
@@ -31,7 +31,7 @@ router = APIRouter(tags=["Leads"])
     summary="Update lead record with call outcome",
     openapi_extra={
         "requestBody": {
-            "content": {"application/json": {"schema": UpdateLeadStatusRequest.model_json_schema()}},
+            "content": {"application/json": {"schema": inline_schema_refs(UpdateLeadStatusRequest.model_json_schema())}},
             "required": True,
         }
     },

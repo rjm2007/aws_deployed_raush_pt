@@ -8,10 +8,30 @@ the dual-format parsing logic in each endpoint is unchanged.
 
 from __future__ import annotations
 
+import copy
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+def inline_schema_refs(schema: dict) -> dict:
+    """Resolve $defs/$ref so Swagger UI can render schemas in openapi_extra."""
+    schema = copy.deepcopy(schema)
+    defs = schema.pop("$defs", {})
+
+    def _resolve(obj):
+        if isinstance(obj, dict):
+            if "$ref" in obj and obj["$ref"].startswith("#/$defs/"):
+                name = obj["$ref"][len("#/$defs/"):]
+                if name in defs:
+                    return _resolve(copy.deepcopy(defs[name]))
+            return {k: _resolve(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_resolve(item) for item in obj]
+        return obj
+
+    return _resolve(schema)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
