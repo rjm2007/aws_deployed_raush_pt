@@ -15,9 +15,11 @@ from app.models.requests import UpdateLeadStatusRequest, inline_schema_refs
 from app.services.supabase_service import (
     supabase_update_lead,
     supabase_insert_scheduled_callback,
+    supabase_insert_notification_log,
     _insert_call_log,
 )
 from app.utils.parser import build_vapi_response
+from app.services.twilio_service import twilio_send_sms
 
 router = APIRouter(tags=["Leads"])
 
@@ -194,9 +196,127 @@ async def vapi_webhook(request: Request):
         overrides       = call_obj.get("assistantOverrides", {})
         variable_values = overrides.get("variableValues", {})
         lead_id         = variable_values.get("lead_id")
+        appointment_id  = variable_values.get("appointment_id")
 
         logger.info("[%s] vapi-webhook end-of-call-report call_id=%s assistant=%s ended=%s lead_id=%s duration=%s",
                     rid, call_id, assistant_id, ended_reason, lead_id, duration_seconds)
+
+        # ── SMS notification (Twilio) for successful appointment outcomes ──
+        # This runs on end-of-call reports and is safe to skip if not configured.
+        # Only send if we have an appointment_id and the call was actually connected (not no-answer).
+        try:
+            if (
+                appointment_id
+                and not (isinstance(appointment_id, str) and appointment_id.startswith("{{"))
+                and ended_reason not in ("customer-did-not-answer", "silence-timed-out")
+            ):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    appt_rows = []
+                    r_appt = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/appointments?id=eq.{appointment_id}"
+                        f"&select=id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,tebra_appointment_id,updated_at",
+                        headers=SUPABASE_HEADERS,
+                    )
+                    if r_appt.status_code == 200:
+                        appt_rows = r_appt.json() or []
+
+                    appt = appt_rows[0] if appt_rows else None
+
+                    # If appointment was rescheduled, find the new appointment row
+                    was_rescheduled = False
+                    if appt and (appt.get("status") == "rescheduled"):
+                        was_rescheduled = True
+                        r_new = await client.get(
+                            f"{SUPABASE_URL}/rest/v1/appointments?rescheduled_from_id=eq.{appointment_id}"
+                            f"&select=id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,tebra_appointment_id,updated_at"
+                            f"&order=updated_at.desc&limit=1",
+                            headers=SUPABASE_HEADERS,
+                        )
+                        if r_new.status_code == 200 and (r_new.json() or []):
+                            appt = (r_new.json() or [None])[0]
+
+                    if appt:
+                        status = (appt.get("status") or "").lower()
+                        patient_name = appt.get("patient_name") or variable_values.get("patient_name") or ""
+                        patient_phone = appt.get("patient_phone") or variable_values.get("patient_phone")
+                        appt_date = appt.get("appointment_date") or variable_values.get("appointment_date")
+                        appt_time = appt.get("appointment_time") or variable_values.get("appointment_time")
+                        appt_location = appt.get("location") or variable_values.get("location")
+                        appt_service = appt.get("service") or variable_values.get("service")
+                        appt_id_for_log = appt.get("id") or appointment_id
+
+                        notification_type = None
+                        sms_body = None
+
+                        if status in ("scheduled", "confirmed"):
+                            notification_type = "sms_appointment_rescheduled" if was_rescheduled else "sms_appointment_confirmation"
+                            sms_body = (
+                                "RAUSCH PHYSICAL THERAPY\n"
+                                f"Your appointment has been {'rescheduled' if was_rescheduled else 'booked'}.\n\n"
+                                f"Name: {patient_name}\n"
+                                f"Location: {appt_location}\n"
+                                f"Date: {appt_date}\n"
+                                f"Time: {appt_time}\n"
+                                f"Phone: {patient_phone}\n"
+                                f"Service: {appt_service}"
+                            ).strip()
+                        elif status == "cancelled":
+                            notification_type = "sms_appointment_cancelled"
+                            sms_body = (
+                                "RAUSCH PHYSICAL THERAPY\n"
+                                "Your appointment has been cancelled.\n\n"
+                                f"Name: {patient_name}\n"
+                                f"Location: {appt_location}\n"
+                                f"Date: {appt_date}\n"
+                                f"Time: {appt_time}\n"
+                                f"Phone: {patient_phone}\n"
+                                f"Service: {appt_service}"
+                            ).strip()
+                        elif status == "rescheduled":
+                            # If we couldn't find a new row, we avoid sending a confusing message.
+                            notification_type = None
+                            sms_body = None
+                        else:
+                            notification_type = None
+                            sms_body = None
+
+                        if notification_type and sms_body and patient_phone:
+                            # Dedupe: if we already sent this notification for this appointment_id, skip.
+                            r_existing = await client.get(
+                                f"{SUPABASE_URL}/rest/v1/notification_log"
+                                f"?appointment_id=eq.{appt_id_for_log}"
+                                f"&notification_type=eq.{notification_type}"
+                                f"&channel=eq.sms"
+                                f"&status=eq.sent"
+                                f"&select=id&limit=1",
+                                headers=SUPABASE_HEADERS,
+                            )
+                            already_sent = (r_existing.status_code == 200 and (r_existing.json() or []))
+
+                            if not already_sent:
+                                ok, sid, err = await twilio_send_sms(patient_phone, sms_body)
+                                await supabase_insert_notification_log({
+                                    "lead_id": lead_id if (lead_id and not str(lead_id).startswith("{{")) else None,
+                                    "appointment_id": appt_id_for_log,
+                                    "notification_type": notification_type,
+                                    "channel": "sms",
+                                    "status": "sent" if ok else "failed",
+                                    "vapi_call_id": call_id,
+                                    "payload": {
+                                        "to": patient_phone,
+                                        "twilio_sid": sid,
+                                        "ended_reason": ended_reason,
+                                        "appointment_status": status,
+                                    },
+                                    "sent_at": datetime.utcnow().isoformat() if ok else None,
+                                })
+                                logger.info("[%s] sms notification type=%s appt_id=%s ok=%s",
+                                            rid, notification_type, appt_id_for_log, ok)
+                            else:
+                                logger.info("[%s] sms notification already sent type=%s appt_id=%s",
+                                            rid, notification_type, appt_id_for_log)
+        except Exception as _sms_e:
+            logger.error("[%s] sms notification error: %s", rid, _sms_e)
 
         if not lead_id or (isinstance(lead_id, str) and lead_id.startswith("{{")):
             logger.info("[%s] vapi-webhook — no valid lead_id, skipping", rid)
