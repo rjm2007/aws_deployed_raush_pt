@@ -180,3 +180,21 @@ class UpdateLeadStatusRequest(BaseModel):
     callback_notes: Optional[str] = Field(None, description="Callback notes")
     tebra_patient_id: Optional[str] = Field(None, description="Tebra patient ID")
     notes: Optional[str] = Field(None, description="Free-text notes")
+
+
+class InboundCallEventRequest(BaseModel):
+    call_id: str = Field(..., description="Unique inbound call ID from provider (used for idempotency)")
+    crm_status: QueueStatus = Field(..., description="Inbound CRM status")
+    caller_phone: Optional[str] = Field(None, example="9491234567", description="Inbound caller phone number")
+    called_number: Optional[str] = Field(None, example="9495550000", description="Clinic destination number")
+    lead_id: Optional[str] = Field(None, description="Supabase lead UUID for status mirroring")
+    appointment_id: Optional[str] = Field(None, description="Supabase appointment UUID when linked")
+    vapi_call_id: Optional[str] = Field(None, description="VAPI call id (if available)")
+    call_status: Optional[str] = Field(None, example="answered", description="Telephony provider call status")
+    started_at: Optional[str] = Field(None, example="2026-04-07T10:15:00Z", description="Call start timestamp (ISO-8601)")
+    ended_at: Optional[str] = Field(None, example="2026-04-07T10:20:30Z", description="Call end timestamp (ISO-8601)")
+    duration_seconds: Optional[int] = Field(None, example=330, description="Call duration in seconds")
+    route: Optional[str] = Field(None, example="appointment_lookup", description="Inbound route selected by IVR/agent")
+    disposition: Optional[str] = Field(None, example="resolved", description="Inbound call disposition")
+    lead_outcome: Optional[LeadOutcome] = Field(None, description="Optional lead outcome to mirror")
+    notes: Optional[str] = Field(None, description="Operator/agent notes for this inbound call")

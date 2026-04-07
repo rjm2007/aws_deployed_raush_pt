@@ -1,9 +1,9 @@
-import re
 import httpx
 from datetime import datetime
 
 from app.core.config import SUPABASE_URL, SUPABASE_HEADERS, SUPABASE_PRACTICE_ID
 from app.core.logger import logger
+from app.utils.name_utils import normalize_person_name_key
 
 
 async def supabase_insert_appointment(data: dict) -> dict | None:
@@ -45,11 +45,6 @@ async def supabase_update_lead(lead_id: str, data: dict) -> bool:
         return False
 
 
-def _normalize_patient_name_key(name: str) -> str:
-    """Collapse whitespace, strip, lower — for exact (case-insensitive) name match."""
-    return re.sub(r"\s+", " ", (name or "").strip()).lower()
-
-
 def _sb_row_time_hm(raw) -> tuple[int, int] | None:
     if raw is None:
         return None
@@ -78,7 +73,7 @@ async def supabase_fetch_appointments_by_patient_date_time(
     """
     if not patient_name or not appointment_date:
         return []
-    name_key = _normalize_patient_name_key(patient_name)
+    name_key = normalize_person_name_key(patient_name)
     if not name_key:
         return []
 
@@ -118,7 +113,7 @@ async def supabase_fetch_appointments_by_patient_date_time(
 
     out: list[dict] = []
     for row in rows:
-        row_name_key = _normalize_patient_name_key(row.get("patient_name") or "")
+        row_name_key = normalize_person_name_key(row.get("patient_name") or "")
         if row_name_key != name_key:
             continue
         hm = _sb_row_time_hm(row.get("appointment_time"))
@@ -185,7 +180,86 @@ _CALL_LOG_OUTCOME_MAP = {
     "assistant-ended-call":      "info_given",
     "in_progress":               "info_given",
     "new":                       "info_given",
+    "follow_up":                 "callback_requested",
+    "manual_follow_up":          "info_given",
+    "complete":                  "info_given",
 }
+
+
+async def supabase_fetch_lead_by_id(lead_id: str) -> dict | None:
+    """Fetch one lead row by id."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
+                "&select=id,queue_status,lead_outcome,call_attempts,last_called_at",
+                headers=SUPABASE_HEADERS,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                return rows[0] if rows else None
+            logger.error("[supabase] fetch_lead_by_id failed status=%s body=%s",
+                         r.status_code, r.text[:300])
+            return None
+    except Exception as e:
+        logger.error("[supabase] fetch_lead_by_id exception: %s", e)
+        return None
+
+
+async def supabase_upsert_inbound_call(data: dict) -> tuple[dict | None, str | None]:
+    """
+    Upsert inbound_calls by call_id.
+    Returns (row_or_none, error_code_or_none).
+
+        error_code values:
+            - missing_table: inbound_calls relation is not present
+            - schema_mismatch: inbound_calls table exists but missing expected columns/constraints
+            - write_failed: any other Supabase write failure
+    """
+    try:
+        payload = dict(data)
+        payload.setdefault("practice_id", SUPABASE_PRACTICE_ID)
+        payload.setdefault("updated_at", datetime.utcnow().isoformat())
+
+        headers = dict(SUPABASE_HEADERS)
+        headers["Prefer"] = "resolution=merge-duplicates,return=representation"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/inbound_calls?on_conflict=call_id",
+                headers=headers,
+                json=payload,
+            )
+            if r.status_code in (200, 201):
+                rows = r.json()
+                return (rows[0] if rows else None), None
+
+            body = r.text or ""
+            body_l = body.lower()
+            if "inbound_calls" in body_l and (
+                "does not exist" in body_l
+                or "relation" in body_l
+                or "could not find the table" in body_l
+            ):
+                logger.error("[supabase] inbound_calls table missing. status=%s body=%s",
+                             r.status_code, body[:300])
+                return None, "missing_table"
+
+            if "inbound_calls" in body_l and (
+                "column" in body_l
+                or "constraint" in body_l
+                or "invalid input syntax" in body_l
+            ):
+                logger.error("[supabase] inbound_calls schema mismatch. status=%s body=%s",
+                             r.status_code, body[:300])
+                return None, "schema_mismatch"
+
+            logger.error("[supabase] upsert_inbound_call failed status=%s body=%s",
+                         r.status_code, body[:300])
+            return None, "write_failed"
+    except Exception as e:
+        logger.error("[supabase] upsert_inbound_call exception: %s", e)
+        return None, "write_failed"
 
 
 async def _insert_call_log(

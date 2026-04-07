@@ -183,9 +183,46 @@ Updates a lead record in Supabase after an outbound VAPI call.
 
 ---
 
+### `POST /api/v1/inbound-call-event`
+
+Upserts inbound call events into `inbound_calls` and mirrors CRM status to the linked lead.
+
+| Field | Required | Example | Notes |
+|---|---|---|---|
+| `call_id` | ✅ | `call_abc123` | Idempotency key (unique per inbound call) |
+| `crm_status` | ✅ | `in_progress` | Allowed: `in_progress`, `follow_up`, `manual_follow_up`, `complete` |
+| `lead_id` | ❌ | `uuid-here` | If provided, mirrors status to `leads.queue_status` |
+| `appointment_id` | ❌ | `uuid-here` | Optional linked appointment UUID |
+| `caller_phone` | ❌ | `9491234567` | Caller number |
+| `called_number` | ❌ | `9495550000` | Dialed clinic number |
+| `vapi_call_id` | ❌ | `call_provider_id` | Provider call id |
+| `call_status` | ❌ | `answered` | Raw telephony status |
+| `started_at` | ❌ | `2026-04-07T10:15:00Z` | ISO datetime |
+| `ended_at` | ❌ | `2026-04-07T10:20:30Z` | ISO datetime |
+| `duration_seconds` | ❌ | `330` | Auto-derived from start/end when omitted |
+| `route` | ❌ | `appointment_lookup` | IVR route |
+| `disposition` | ❌ | `resolved` | Call disposition |
+| `lead_outcome` | ❌ | `manual` | Optional mirror to `leads.lead_outcome` |
+| `notes` | ❌ | `Caller asked to follow up tomorrow.` | Free text |
+
+If the `inbound_calls` table does not exist yet, apply:
+
+`sql/2026-04-07_create_inbound_calls.sql`
+
+---
+
 ### `POST /api/v1/vapi-webhook`
 
 End-of-call fallback — receives VAPI server events. Not useful to test manually via Swagger. VAPI posts to this automatically after every call.
+
+---
+
+## Name Normalization Rules
+
+Patient name matching uses strict normalization only (no fuzzy matching):
+- trim leading/trailing spaces
+- collapse repeated internal spaces
+- lowercase for case-insensitive exact compare
 
 ---
 

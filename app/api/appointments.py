@@ -51,6 +51,7 @@ from app.utils.time_utils import (
     parse_tebra_local_start_datetime,
 )
 from app.utils.parser import build_vapi_response
+from app.utils.name_utils import normalize_person_name_key
 
 router = APIRouter(tags=["Appointments"])
 
@@ -428,10 +429,6 @@ async def update_appointment_status(request: Request):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _normalize_inbound_name_key(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "").strip()).lower()
-
-
 def _inbound_row_from_supabase(row: dict) -> dict | None:
     """Map a Supabase appointments row to the same shape as Tebra inbound parse (+ source)."""
     tid = row.get("tebra_appointment_id")
@@ -483,7 +480,7 @@ def _filter_tebra_inbound_by_exact_slot(
 
     out = []
     for a in tebra_appointments:
-        pf = _normalize_inbound_name_key(a.get("patient_full_name") or "")
+        pf = normalize_person_name_key(a.get("patient_full_name") or "")
         if not pf or pf != name_norm:
             continue
         ad = a.get("appointment_date")
@@ -520,7 +517,7 @@ async def _resolve_current_appointment_by_name_datetime(
     Supabase first (exact name + date + time), else Tebra same-day then filter.
     Returns (unified appointment dicts, lookup_source, tebra_error_message_or_none).
     """
-    name_key = _normalize_inbound_name_key(name_clean)
+    name_key = normalize_person_name_key(name_clean)
     if not name_key:
         return [], "", None
 
@@ -645,7 +642,7 @@ async def inbound_lookup_appointments(request: Request):
                 )
 
         name_clean = str(name).strip()
-        if not _normalize_inbound_name_key(name_clean):
+        if not normalize_person_name_key(name_clean):
             return build_vapi_response(tool_call_id, "patient_full_name cannot be empty.")
 
         appts, lookup_source, tebra_err = await _resolve_current_appointment_by_name_datetime(
@@ -761,7 +758,7 @@ async def reschedule_appointment(request: Request):
                         f"timezone_offset_from_gmt must be an integer. You said '{tz_resolve}'.",
                     )
             name_r = str(resolve_name).strip()
-            if not _normalize_inbound_name_key(name_r):
+            if not normalize_person_name_key(name_r):
                 return build_vapi_response(
                     tool_call_id,
                     "resolve_patient_full_name cannot be empty.",

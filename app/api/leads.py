@@ -1,4 +1,3 @@
-import httpx
 from datetime import datetime
 from uuid import uuid4
 
@@ -6,20 +5,27 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.core.config import (
-    SUPABASE_URL,
-    SUPABASE_HEADERS,
     VAPI_REMINDER_ASSISTANT_ID,
 )
 from app.core.logger import logger
-from app.models.requests import UpdateLeadStatusRequest
+from app.models.requests import UpdateLeadStatusRequest, InboundCallEventRequest
 from app.services.supabase_service import (
     supabase_update_lead,
     supabase_insert_scheduled_callback,
+    supabase_upsert_inbound_call,
+    supabase_fetch_lead_by_id,
     _insert_call_log,
 )
 from app.utils.parser import build_vapi_response
 
 router = APIRouter(tags=["Leads"])
+
+_INBOUND_ALLOWED_CRM_STATUSES = {
+    "in_progress",
+    "follow_up",
+    "manual_follow_up",
+    "complete",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,18 +80,12 @@ async def update_lead_status(request: Request):
             return build_vapi_response(tool_call_id, msg)
 
         # ── Verify lead exists and check current state for idempotency ──
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
-                f"&select=id,queue_status,lead_outcome,call_attempts,last_called_at",
-                headers=SUPABASE_HEADERS,
+        current_lead = await supabase_fetch_lead_by_id(lead_id)
+        if not current_lead:
+            return build_vapi_response(
+                tool_call_id,
+                f"Lead with id {lead_id} not found. Cannot update."
             )
-            if r.status_code != 200 or not r.json():
-                return build_vapi_response(
-                    tool_call_id,
-                    f"Lead with id {lead_id} not found. Cannot update."
-                )
-            current_lead = r.json()[0]
 
         # ── Idempotency: skip duplicate update if already in terminal state ──
         current_qs = current_lead.get("queue_status")
@@ -157,6 +157,163 @@ async def update_lead_status(request: Request):
         )
 
 
+@router.post(
+    "/inbound-call-event",
+    summary="Upsert inbound call and mirror CRM status to lead",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": InboundCallEventRequest.model_json_schema()}},
+            "required": True,
+        }
+    },
+)
+async def inbound_call_event(request: Request):
+    """
+    Receives inbound call progress events and persists them into inbound_calls.
+    Optionally mirrors CRM status into leads and writes inbound call_logs rows.
+    """
+    try:
+        rid = str(uuid4())[:8]
+        body = await request.json()
+        logger.info("[%s] ======== inbound-call-event START ========", rid)
+        logger.info("[%s] inbound-call-event body=%s", rid, body)
+
+        tool_call_id = None
+        if "message" in body and "toolCalls" in body["message"]:
+            tc = body["message"]["toolCalls"][0]
+            tool_call_id = tc.get("id")
+            args = tc["function"]["arguments"]
+        else:
+            args = body
+
+        call_id = str(args.get("call_id") or "").strip()
+        crm_status = str(args.get("crm_status") or "").strip()
+        lead_id = args.get("lead_id")
+        appointment_id = args.get("appointment_id")
+        lead_outcome = args.get("lead_outcome")
+
+        if not call_id:
+            return build_vapi_response(tool_call_id, "Missing call_id.")
+
+        if crm_status not in _INBOUND_ALLOWED_CRM_STATUSES:
+            return build_vapi_response(
+                tool_call_id,
+                "crm_status must be one of: in_progress, follow_up, manual_follow_up, complete.",
+            )
+
+        started_at = args.get("started_at")
+        ended_at = args.get("ended_at")
+        duration_seconds = args.get("duration_seconds")
+        if duration_seconds is None and started_at and ended_at:
+            try:
+                s = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+                e = datetime.fromisoformat(str(ended_at).replace("Z", "+00:00"))
+                duration_seconds = int((e - s).total_seconds())
+            except Exception:
+                duration_seconds = None
+
+        now_iso = datetime.utcnow().isoformat()
+        inbound_payload = {
+            "call_id": call_id,
+            "call_direction": "inbound",
+            "crm_status": crm_status,
+            "caller_phone": args.get("caller_phone"),
+            "called_number": args.get("called_number"),
+            "lead_id": lead_id,
+            "appointment_id": appointment_id,
+            "vapi_call_id": args.get("vapi_call_id"),
+            "call_status": args.get("call_status"),
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_seconds": duration_seconds,
+            "route": args.get("route"),
+            "disposition": args.get("disposition"),
+            "notes": args.get("notes"),
+            "updated_at": now_iso,
+        }
+        inbound_payload = {k: v for k, v in inbound_payload.items() if v is not None}
+
+        inbound_row, inbound_err = await supabase_upsert_inbound_call(inbound_payload)
+        if inbound_err == "missing_table":
+            return build_vapi_response(
+                tool_call_id,
+                "inbound_calls table is missing in Supabase. Run the SQL migration first and retry.",
+            )
+        if inbound_err == "schema_mismatch":
+            return build_vapi_response(
+                tool_call_id,
+                "inbound_calls schema does not match expected columns. Apply sql/2026-04-07_create_inbound_calls.sql and retry.",
+            )
+        if inbound_err:
+            return build_vapi_response(
+                tool_call_id,
+                "Failed to persist inbound call event. Please check logs.",
+            )
+
+        lead_updated = False
+        lead_update_note = None
+        if lead_id:
+            existing_lead = await supabase_fetch_lead_by_id(str(lead_id))
+            if not existing_lead:
+                lead_update_note = f"Lead {lead_id} not found; inbound call saved only."
+            else:
+                lead_patch = {
+                    "queue_status": crm_status,
+                    "updated_at": now_iso,
+                }
+                if lead_outcome:
+                    lead_patch["lead_outcome"] = lead_outcome
+
+                current_qs = existing_lead.get("queue_status")
+                current_lo = existing_lead.get("lead_outcome")
+                if current_qs == crm_status and (not lead_outcome or current_lo == lead_outcome):
+                    lead_updated = True
+                else:
+                    lead_updated = await supabase_update_lead(str(lead_id), lead_patch)
+                    if not lead_updated:
+                        lead_update_note = "Inbound call saved, but lead update failed."
+
+                await _insert_call_log(
+                    rid=rid,
+                    lead_id=str(lead_id),
+                    vapi_call_id=args.get("vapi_call_id") or call_id,
+                    call_status=args.get("call_status") or crm_status,
+                    duration_seconds=duration_seconds,
+                    call_type="inbound_call",
+                    call_direction="inbound",
+                    outcome=lead_outcome or crm_status,
+                    notes=(args.get("notes") or "")[:500] or None,
+                    appointment_id=appointment_id,
+                )
+
+        msg = f"Inbound call {call_id} saved with crm_status={crm_status}."
+        if lead_id:
+            msg += " Lead mirrored." if lead_updated else " Lead mirror incomplete."
+        if lead_update_note:
+            msg += f" {lead_update_note}"
+
+        if tool_call_id:
+            return build_vapi_response(tool_call_id, msg)
+
+        return JSONResponse(
+            content={
+                "message": msg,
+                "inbound_call_id": inbound_row.get("id") if inbound_row else None,
+                "call_id": call_id,
+                "crm_status": crm_status,
+                "lead_updated": lead_updated,
+                "lead_update_note": lead_update_note,
+            }
+        )
+
+    except Exception as e:
+        logger.exception("Error in /inbound-call-event: %s", e)
+        return build_vapi_response(
+            locals().get("tool_call_id"),
+            "Sorry, there was an error handling the inbound call event. Please try again.",
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT: VAPI WEBHOOK (end-of-call fallback)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,16 +365,10 @@ async def vapi_webhook(request: Request):
             return JSONResponse(content={"ok": True})
 
         # ── Check if lead was already updated by the tool call ──
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
-                f"&select=id,queue_status,lead_outcome,call_attempts",
-                headers=SUPABASE_HEADERS,
-            )
-            if r.status_code != 200 or not r.json():
-                logger.warning("[%s] vapi-webhook — lead %s not found", rid, lead_id)
-                return JSONResponse(content={"ok": True})
-            lead = r.json()[0]
+        lead = await supabase_fetch_lead_by_id(lead_id)
+        if not lead:
+            logger.warning("[%s] vapi-webhook — lead %s not found", rid, lead_id)
+            return JSONResponse(content={"ok": True})
 
         current_qs      = lead.get("queue_status")
         current_outcome = lead.get("lead_outcome")
