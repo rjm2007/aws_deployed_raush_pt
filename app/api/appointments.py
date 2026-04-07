@@ -503,6 +503,38 @@ async def reschedule_appointment(request: Request):
                 f"I need the time in HH:MM format or like '9 AM'. You said '{new_time}'."
             )
 
+        time_normalized = f"{parsed_time[0]:02d}:{parsed_time[1]:02d}"
+
+        # ── Idempotency guard (Supabase-first) ──
+        # If VAPI retries this tool call (e.g. connection reset) after a successful reschedule,
+        # we must not create a second "new" appointment.
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/appointments"
+                    f"?rescheduled_from_id=eq.{appointment_id}"
+                    f"&appointment_date=eq.{new_date}"
+                    f"&appointment_time=eq.{time_normalized}"
+                    f"&select=id,tebra_appointment_id",
+                    headers=SUPABASE_HEADERS,
+                )
+                if r.status_code == 200 and r.json():
+                    existing = r.json()[0]
+                    existing_sb_id = existing.get("id")
+                    existing_tebra = existing.get("tebra_appointment_id")
+                    logger.info(
+                        "[%s] reschedule IDEMPOTENT hit old_appt_id=%s new_appt_id=%s new_tebra_id=%s",
+                        rid, appointment_id, existing_sb_id, existing_tebra
+                    )
+                    msg = (
+                        f"Appointment already rescheduled! "
+                        f"New appointment on {new_date} at {format_12hr(parsed_time[0], parsed_time[1])}. "
+                        f"appointment_id:{existing_sb_id} tebra_id:{existing_tebra}"
+                    )
+                    return build_vapi_response(tool_call_id, msg)
+        except Exception as e:
+            logger.error("[%s] reschedule idempotency check error: %s", rid, e)
+
         # ── Step 1: Get current appointment from Tebra ──
         logger.info("[%s] STEP 1 → GetAppointment tebra_id=%s", rid, tebra_appt_id)
         old_appt = await call_tebra_get_appointment(tebra_appt_id, rid)
@@ -582,7 +614,6 @@ async def reschedule_appointment(request: Request):
             )
 
         new_tebra_id    = create_result["appointment_id"]
-        time_normalized = f"{parsed_time[0]:02d}:{parsed_time[1]:02d}"
 
         # ── Step 4: Update Supabase — mark old appointment as rescheduled ──
         await supabase_update_appointment(appointment_id, {
