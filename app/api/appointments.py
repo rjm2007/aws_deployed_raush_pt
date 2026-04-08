@@ -747,8 +747,8 @@ async def confirm_appointment(request: Request):
             "status":     outcome,
             "updated_at": datetime.utcnow().isoformat(),
         }
-        # NOTE: Supabase appointments table does not have a reminder_notes column.
-        # Notes should be stored on leads/call_logs instead (or add a DB migration later).
+        if notes:
+            appt_payload["reminder_notes"] = notes
         if outcome == "cancelled":
             appt_payload["cancelled_at"] = datetime.utcnow().isoformat()
 
@@ -861,8 +861,8 @@ async def cancel_appointment(request: Request):
             "cancelled_at": now_iso,
             "updated_at":   now_iso,
         }
-        # NOTE: Supabase appointments table does not have a reminder_notes column.
-        # Notes should be stored on leads/call_logs instead (or add a DB migration later).
+        if notes:
+            appt_payload["reminder_notes"] = notes
 
         # ── Helper: Tebra cancel (Get → Update) ──
         async def _tebra_cancel() -> str:
