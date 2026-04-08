@@ -305,13 +305,14 @@ async def vapi_webhook(request: Request):
                                     "payload": {
                                         "to": patient_phone,
                                         "twilio_sid": sid,
+                                        "error": err,
                                         "ended_reason": ended_reason,
                                         "appointment_status": status,
                                     },
                                     "sent_at": datetime.utcnow().isoformat() if ok else None,
                                 })
-                                logger.info("[%s] sms notification type=%s appt_id=%s ok=%s",
-                                            rid, notification_type, appt_id_for_log, ok)
+                                logger.info("[%s] sms notification type=%s appt_id=%s ok=%s err=%s",
+                                            rid, notification_type, appt_id_for_log, ok, err)
                             else:
                                 logger.info("[%s] sms notification already sent type=%s appt_id=%s",
                                             rid, notification_type, appt_id_for_log)
