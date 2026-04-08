@@ -38,6 +38,7 @@ from app.services.supabase_service import (
     supabase_update_appointment,
     supabase_update_lead,
 )
+from app.services.appointment_sms_service import send_appointment_sms_if_needed
 from app.utils.time_utils import (
     parse_time_to_24hr,
     format_12hr,
@@ -301,6 +302,23 @@ async def create_appointment(request: Request):
             supabase_appt_id = supabase_appt.get("id") if supabase_appt else None
             logger.info("[%s] RESPONSE → supabase_appt_id=%s tebra_appt_id=%s",
                         rid, supabase_appt_id, tebra_appt_id)
+
+            # ── SMS (booked) — send only after Supabase insert success ──
+            if supabase_appt_id:
+                await send_appointment_sms_if_needed(
+                    rid=rid,
+                    appointment_id=supabase_appt_id,
+                    notification_type="sms_appointment_booked",
+                    appt={
+                        "patient_name": name,
+                        "patient_phone": phone,
+                        "appointment_date": date,
+                        "appointment_time": time_normalized,
+                        "location": location,
+                        "service": service,
+                    },
+                    lead_id=lead_id if lead_id and not str(lead_id).startswith("{{") else None,
+                )
             msg = (
                 f"Appointment booked successfully! "
                 f"{name} is scheduled for {service} at {location} "
@@ -665,6 +683,23 @@ async def reschedule_appointment(request: Request):
         logger.info("[%s] reschedule complete old_tebra=%s → new_tebra=%s new_supabase=%s",
                     rid, tebra_appt_id, new_tebra_id, new_sb_id)
 
+        # ── SMS (rescheduled) — send only after new Supabase appointment insert success ──
+        if new_sb_id:
+            await send_appointment_sms_if_needed(
+                rid=rid,
+                appointment_id=new_sb_id,
+                notification_type="sms_appointment_rescheduled",
+                appt={
+                    "patient_name": new_appt_data.get("patient_name") or "",
+                    "patient_phone": new_appt_data.get("patient_phone") or "",
+                    "appointment_date": new_date,
+                    "appointment_time": time_normalized,
+                    "location": new_appt_data.get("location") or new_location or "",
+                    "service": new_appt_data.get("service") or new_service or "",
+                },
+                lead_id=new_appt_data.get("lead_id"),
+            )
+
         msg = (
             f"Appointment rescheduled successfully! "
             f"New appointment on {new_date} at {format_12hr(parsed_time[0], parsed_time[1])}. "
@@ -795,6 +830,24 @@ async def confirm_appointment(request: Request):
             await supabase_update_lead(lead_id, lead_payload)
             logger.info("[%s] lead updated lead_id=%s", rid, lead_id)
 
+        # ── SMS (confirm/cancel) — send only after Supabase update success ──
+        if sb_ok:
+            notif_type = "sms_appointment_cancelled" if outcome == "cancelled" else "sms_appointment_confirmed"
+            await send_appointment_sms_if_needed(
+                rid=rid,
+                appointment_id=appointment_id,
+                notification_type=notif_type,
+                appt={
+                    "patient_phone": None,  # will be resolved by Twilio formatter if present; here we rely on Supabase values in webhook, but tool SMS needs phone
+                    "patient_name": "",
+                    "appointment_date": None,
+                    "appointment_time": None,
+                    "location": None,
+                    "service": None,
+                },
+                lead_id=lead_id if lead_id and not str(lead_id).startswith("{{") else None,
+            )
+
         return build_vapi_response(tool_call_id, msg)
 
     except Exception as e:
@@ -913,6 +966,16 @@ async def cancel_appointment(request: Request):
 
         logger.info("[%s] cancel-appointment DONE tebra=%s sb=%s lead=%s",
                     rid, tebra_ok, sb_ok, lead_ok)
+
+        # ── SMS (cancelled) — send only after Supabase update success ──
+        if sb_ok:
+            await send_appointment_sms_if_needed(
+                rid=rid,
+                appointment_id=appointment_id,
+                notification_type="sms_appointment_cancelled",
+                appt={},
+                lead_id=lead_id if lead_id and not str(lead_id).startswith("{{") else None,
+            )
 
         return build_vapi_response(tool_call_id, msg)
 
