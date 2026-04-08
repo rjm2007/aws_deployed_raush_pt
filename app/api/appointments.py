@@ -3,6 +3,7 @@ import asyncio
 import httpx
 from datetime import datetime
 from uuid import uuid4
+from difflib import SequenceMatcher
 
 from fastapi import APIRouter, Request
 
@@ -12,6 +13,7 @@ from app.models.requests import (
     RescheduleAppointmentRequest,
     ConfirmAppointmentRequest,
     CancelAppointmentRequest,
+    InboundLookupAppointmentsRequest,
     inline_schema_refs,
 )
 
@@ -37,6 +39,7 @@ from app.services.supabase_service import (
     supabase_insert_appointment,
     supabase_update_appointment,
     supabase_update_lead,
+    supabase_fetch_appointments_by_patient_date_time,
 )
 from app.services.appointment_sms_service import send_appointment_sms_if_needed
 from app.utils.time_utils import (
@@ -51,6 +54,109 @@ from app.utils.time_utils import (
 from app.utils.parser import build_vapi_response
 
 router = APIRouter(tags=["Appointments"])
+
+def _normalize_phone_digits(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) < 10:
+        return None
+    if len(digits) > 15:
+        return None
+    return digits
+
+def _normalize_person_name_key(raw: str | None) -> str:
+    if not raw:
+        return ""
+    return " ".join(str(raw).strip().lower().split())
+
+
+def _sb_row_time_hm(raw) -> tuple[int, int] | None:
+    if raw is None:
+        return None
+    ts = str(raw).strip()
+    if not ts:
+        return None
+    seg = ts.split(":")
+    if len(seg) < 2:
+        return None
+    try:
+        return int(seg[0]), int(seg[1])
+    except ValueError:
+        return None
+
+
+def _extract_caller_number_from_vapi(body: dict) -> str | None:
+    """Try to read inbound caller number from VAPI wrapper payload."""
+    if not isinstance(body, dict):
+        return None
+    msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+    cust = msg.get("customer") if isinstance(msg.get("customer"), dict) else {}
+    call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
+    return (
+        cust.get("number")
+        or cust.get("phoneNumber")
+        or call_obj.get("from")
+        or call_obj.get("fromNumber")
+        or (call_obj.get("customer", {}) or {}).get("number")
+    )
+
+
+def _fuzzy_ratio(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _inbound_row_from_supabase(row: dict) -> dict | None:
+    tid = row.get("tebra_appointment_id")
+    if not tid:
+        return None
+    appt_date = row.get("appointment_date")
+    time_raw = row.get("appointment_time")
+    time_12 = None
+    time_24 = None
+    if time_raw is not None:
+        ts = str(time_raw).strip()
+        if ts:
+            seg = ts.split(":")
+            if len(seg) >= 2:
+                try:
+                    h, mn = int(seg[0]), int(seg[1])
+                    time_12 = format_12hr(h, mn)
+                    time_24 = f"{h:02d}:{mn:02d}"
+                except ValueError:
+                    time_24 = ts[:5] if len(ts) >= 5 else ts
+    return {
+        "tebra_appointment_id": str(tid),
+        "patient_full_name": row.get("patient_name"),
+        "appointment_date": appt_date,
+        "appointment_time_12hr": time_12,
+        "appointment_time_24hr": time_24,
+        "service_location_name": row.get("location"),
+        "appointment_reason": row.get("service"),
+        "confirmation_status": row.get("status"),
+        "supabase_appointment_id": row.get("id"),
+        "source": "supabase",
+    }
+
+
+def _format_inbound_lookup_summary(appointments: list, lookup_source: str) -> str:
+    if not appointments:
+        return (
+            "No appointments in our clinic records for that exact name, date, and time."
+        )
+    src_label = "clinic records" if lookup_source == "supabase" else "Tebra"
+    parts = []
+    for a in appointments:
+        loc = a.get("service_location_name") or "unknown location"
+        sb = a.get("supabase_appointment_id")
+        sb_bit = f" appointment_id:{sb}" if sb else ""
+        parts.append(
+            f"tebra_id {a['tebra_appointment_id']}: {a.get('appointment_date') or '?'} "
+            f"at {a.get('appointment_time_12hr') or a.get('appointment_time_24hr') or '?'} — {loc}{sb_bit}"
+        )
+    return f"Found {len(appointments)} appointment(s) via {src_label}. " + " | ".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,6 +335,41 @@ async def create_appointment(request: Request):
                                 )
                     except Exception as _e:
                         logger.error("[%s] STEP 1c idempotency check error: %s", rid, _e)
+
+                # ── Inbound idempotency (no lead_id): phone + exact slot (+ location) ──
+                if not lead_id and phone:
+                    try:
+                        phone_digits = _normalize_phone_digits(phone)
+                        if phone_digits:
+                            async with httpx.AsyncClient(timeout=8.0) as _client:
+                                _r2 = await _client.get(
+                                    f"{SUPABASE_URL}/rest/v1/appointments"
+                                    f"?patient_phone=eq.{phone_digits}"
+                                    f"&appointment_date=eq.{date}"
+                                    f"&appointment_time=eq.{time_normalized}"
+                                    f"&status=eq.scheduled"
+                                    f"&location=eq.{location}"
+                                    f"&select=id,tebra_appointment_id,patient_name",
+                                    headers=SUPABASE_HEADERS,
+                                )
+                                if _r2.status_code == 200 and _r2.json():
+                                    existing = _r2.json()[0]
+                                    existing_sb_id = existing.get("id")
+                                    existing_tebra = existing.get("tebra_appointment_id")
+                                    logger.info(
+                                        "[%s] STEP 1c IDEMPOTENT(inbound): slot conflict but phone already has "
+                                        "scheduled appt sb=%s tebra=%s — returning success",
+                                        rid, existing_sb_id, existing_tebra,
+                                    )
+                                    return build_vapi_response(
+                                        tool_call_id,
+                                        f"Appointment booked successfully! "
+                                        f"{name} is scheduled for {service} at {location} "
+                                        f"on {date} at {format_12hr(parsed_time[0], parsed_time[1])}. "
+                                        f"appointment_id:{existing_sb_id} tebra_id:{existing_tebra}",
+                                    )
+                    except Exception as _e2:
+                        logger.error("[%s] STEP 1c inbound idempotency check error: %s", rid, _e2)
 
                 available_now = get_available_slots(booked_now, date, location)
                 nearest       = get_nearest_available_slots(parsed_time[0], parsed_time[1], available_now)
@@ -984,4 +1125,150 @@ async def cancel_appointment(request: Request):
         return build_vapi_response(
             locals().get("tool_call_id"),
             "Sorry, there was an error cancelling the appointment. Please try again."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINT: INBOUND LOOKUP APPOINTMENTS (Supabase by name+date+time)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/inbound-lookup-appointments",
+    summary="Resolve appointment IDs by exact patient name + appointment date + time (Supabase only)",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": inline_schema_refs(InboundLookupAppointmentsRequest.model_json_schema())}},
+            "required": True,
+        }
+    },
+)
+async def inbound_lookup_appointments(request: Request):
+    """
+    Inbound helper endpoint for the inbound assistant.
+    This is intentionally strict (no fuzzy matching) to avoid returning wrong appointment IDs.
+    """
+    try:
+        rid = str(uuid4())[:8]
+        body = await request.json()
+        logger.info("[%s] ======== inbound-lookup-appointments START ========", rid)
+        logger.info("[%s] inbound-lookup-appointments body=%s", rid, body)
+
+        tool_call_id = None
+        if "message" in body and "toolCalls" in body["message"]:
+            tc = body["message"]["toolCalls"][0]
+            tool_call_id = tc.get("id")
+            args = tc["function"]["arguments"]
+        else:
+            args = body
+
+        name = args.get("patient_full_name") or args.get("name") or args.get("patient_name")
+        date = args.get("date") or args.get("appointment_date")
+        time_str = args.get("time") or args.get("appointment_time")
+        caller_number = args.get("caller_number") or args.get("caller_phone") or args.get("patient_phone") or _extract_caller_number_from_vapi(body)
+
+        missing = [k for k, v in {
+            "patient_full_name": name,
+            "date": date,
+            "time": time_str,
+        }.items() if not v]
+        if missing:
+            return build_vapi_response(tool_call_id, f"Missing required fields: {', '.join(missing)}.")
+
+        name_clean = str(name).strip()
+        if not _normalize_person_name_key(name_clean):
+            return build_vapi_response(tool_call_id, "patient_full_name cannot be empty.")
+
+        date_s = str(date).strip()
+        if not re.match(r"^\\d{4}-\\d{2}-\\d{2}$", date_s):
+            return build_vapi_response(
+                tool_call_id,
+                f"I need the appointment date in YYYY-MM-DD format. You said '{date}'.",
+            )
+
+        parsed_time = parse_time_to_24hr(str(time_str).strip())
+        if not parsed_time:
+            return build_vapi_response(
+                tool_call_id,
+                f"I need the appointment time in HH:MM or like '7 PM'. You said '{time_str}'.",
+            )
+        hour, minute = parsed_time
+
+        # ── Preferred path: caller_number (phone) + date + time, then safe fuzzy on name ──
+        phone_digits = _normalize_phone_digits(caller_number) if caller_number else None
+        if phone_digits:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/appointments",
+                        headers=SUPABASE_HEADERS,
+                        params=[
+                            ("select", "id,tebra_appointment_id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status"),
+                            ("patient_phone", f"eq.{phone_digits}"),
+                            ("appointment_date", f"eq.{date_s}"),
+                            ("tebra_appointment_id", "not.is.null"),
+                            ("or", f"(practice_id.eq.{SUPABASE_PRACTICE_ID},practice_id.is.null)"),
+                            ("order", "appointment_time.asc"),
+                        ],
+                    )
+                if r.status_code == 200:
+                    rows = r.json() or []
+                    # Keep exact clock time matches only.
+                    time_matches = []
+                    for row in rows:
+                        hm = _sb_row_time_hm(row.get("appointment_time"))
+                        if hm and hm[0] == hour and hm[1] == minute:
+                            time_matches.append(row)
+
+                    if time_matches:
+                        # If only one row matches the slot, return it.
+                        if len(time_matches) == 1:
+                            appt = _inbound_row_from_supabase(time_matches[0])
+                            summary = _format_inbound_lookup_summary([appt] if appt else [], "supabase")
+                            return build_vapi_response(tool_call_id, summary)
+
+                        # Safe fuzzy: pick best name match if it is clearly dominant.
+                        target = _normalize_person_name_key(name_clean)
+                        scored = []
+                        for row in time_matches:
+                            cand = _normalize_person_name_key(row.get("patient_name") or "")
+                            if not cand:
+                                continue
+                            scored.append((row, _fuzzy_ratio(target, cand)))
+                        scored.sort(key=lambda t: t[1], reverse=True)
+
+                        if scored:
+                            best_row, best_score = scored[0]
+                            second_score = scored[1][1] if len(scored) > 1 else 0.0
+
+                            # Conservative thresholds to avoid wrong matches.
+                            if best_score >= 0.86 and (best_score - second_score) >= 0.08:
+                                appt = _inbound_row_from_supabase(best_row)
+                                summary = _format_inbound_lookup_summary([appt] if appt else [], "supabase")
+                                return build_vapi_response(tool_call_id, summary)
+
+                        return build_vapi_response(
+                            tool_call_id,
+                            "I found multiple appointments for that phone number at that exact date and time. "
+                            "Please ask the caller to confirm the appointment location.",
+                        )
+            except Exception as _e:
+                logger.warning("[%s] inbound lookup phone-first error: %s", rid, _e)
+
+        sb_rows = await supabase_fetch_appointments_by_patient_date_time(
+            name_clean, date_s, hour, minute,
+        )
+
+        appts: list[dict] = []
+        for row in sb_rows:
+            norm = _inbound_row_from_supabase(row)
+            if norm:
+                appts.append(norm)
+
+        summary = _format_inbound_lookup_summary(appts, "supabase")
+        return build_vapi_response(tool_call_id, summary)
+    except Exception as e:
+        logger.exception("Error in /inbound-lookup-appointments: %s", e)
+        return build_vapi_response(
+            locals().get("tool_call_id"),
+            "Sorry, there was an error looking up appointments. Please try again.",
         )

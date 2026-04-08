@@ -74,6 +74,12 @@ class LeadOutcome(str, Enum):
     callback        = "callback"
     manual          = "manual"
 
+class InboundCrmStatus(str, Enum):
+    in_progress      = "in_progress"
+    follow_up        = "follow_up"
+    manual_follow_up = "manual_follow_up"
+    complete         = "complete"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AVAILABILITY
@@ -144,3 +150,25 @@ class UpdateLeadStatusRequest(BaseModel):
     callback_notes: Optional[str] = Field(None, description="Callback notes")
     tebra_patient_id: Optional[str] = Field(None, description="Tebra patient ID")
     notes: Optional[str] = Field(None, description="Free-text notes")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INBOUND
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UpdateInboundStatusRequest(BaseModel):
+    crm_status: InboundCrmStatus = Field(..., description="Inbound CRM status for this call")
+    summary: Optional[str] = Field(None, description="2–3 sentence recap of the call")
+    notes: Optional[str] = Field(None, description="Alias of summary (either is ok)")
+    route: Optional[str] = Field(None, example="reschedule", description="Inbound route label (e.g. new_appointment, reschedule)")
+    caller_name: Optional[str] = Field(None, example="John Smith", description="Caller full name if known")
+    appointment_id: Optional[str] = Field(None, description="Supabase appointment UUID when resolved")
+    call_id: Optional[str] = Field(None, description="Optional. VAPI call id; backend can also infer it from wrapper payload")
+    caller_number: Optional[str] = Field(None, example="9495551212", description="Optional. Caller phone digits (backend can infer it from wrapper payload)")
+
+
+class InboundLookupAppointmentsRequest(BaseModel):
+    patient_full_name: str = Field(..., example="John Smith", description="Patient full name")
+    date: str = Field(..., example="2026-04-15", description="Appointment date in YYYY-MM-DD")
+    time: str = Field(..., example="10:00", description="Appointment time in HH:MM or natural format like '7 PM'")
+    caller_number: Optional[str] = Field(None, example="9495551212", description="Optional. Caller digits to enable phone-first matching")

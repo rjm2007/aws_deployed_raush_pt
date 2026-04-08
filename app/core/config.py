@@ -18,6 +18,8 @@ RESOURCE_ID = os.getenv("RESOURCE_ID", "1")
 # ─── VAPI Assistant IDs ───────────────────────────────────────────────────────
 VAPI_LEAD_ASSISTANT_ID     = os.getenv("VAPI_LEAD_ASSISTANT_ID",     "a4fef714-66cf-4dd5-869c-5f2ebe4cadf0")
 VAPI_REMINDER_ASSISTANT_ID = os.getenv("VAPI_REMINDER_ASSISTANT_ID", "cdee681d-59d6-47a6-b222-a22827c62e3e")
+VAPI_INBOUND_ASSISTANT_ID  = os.getenv("VAPI_INBOUND_ASSISTANT_ID", "").strip()
+VAPI_API_KEY               = os.getenv("VAPI_API_KEY", "").strip()
 
 # ─── Twilio (SMS) ─────────────────────────────────────────────────────────────
 TWILIO_ACCOUNT_SID  = os.getenv("TWILIO_ACCOUNT_SID")

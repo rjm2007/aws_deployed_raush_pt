@@ -9,19 +9,203 @@ from app.core.config import (
     SUPABASE_URL,
     SUPABASE_HEADERS,
     VAPI_REMINDER_ASSISTANT_ID,
+    VAPI_INBOUND_ASSISTANT_ID,
 )
 from app.core.logger import logger
-from app.models.requests import UpdateLeadStatusRequest, inline_schema_refs
+from app.models.requests import UpdateInboundStatusRequest, UpdateLeadStatusRequest, inline_schema_refs
 from app.services.supabase_service import (
     supabase_update_lead,
     supabase_insert_scheduled_callback,
     supabase_insert_notification_log,
+    supabase_upsert_inbound_call,
+    supabase_fetch_inbound_call_by_call_id,
     _insert_call_log,
 )
 from app.utils.parser import build_vapi_response
 from app.services.twilio_service import twilio_send_sms
 
 router = APIRouter(tags=["Leads"])
+
+# Must match Supabase CHECK constraint on public.inbound_calls.crm_status.
+_INBOUND_ALLOWED_CRM_STATUSES = {
+    "in_progress",
+    "follow_up",
+    "manual_follow_up",
+    "complete",
+}
+
+def _is_inbound_vapi_call(call_obj: dict, variable_values: dict) -> bool:
+    """
+    Prefer Vapi system fields over custom variables.
+    Vapi sets call.type to e.g. "inboundPhoneCall" / "outboundPhoneCall".
+    """
+    try:
+        call_type = (call_obj.get("type") or "").strip()
+        if call_type == "inboundPhoneCall":
+            return True
+        if call_type == "outboundPhoneCall":
+            return False
+    except Exception:
+        pass
+
+    # Fallbacks (less reliable).
+    call_direction = (variable_values.get("call_direction") or variable_values.get("direction") or "").strip().lower()
+    if call_direction == "inbound":
+        return True
+    if call_direction == "outbound":
+        return False
+
+    # Last resort: inbound assistant id marker (works when assistant is pinned to phone number).
+    return False
+
+
+def _normalize_phone(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) < 10:
+        return None
+    if len(digits) > 15:
+        return None
+    return digits
+
+
+def _extract_tool_args(body: dict) -> tuple[str | None, dict]:
+    """Return (tool_call_id, args_dict) for either VAPI wrapper or direct JSON payload."""
+    tool_call_id = None
+    args: dict = body if isinstance(body, dict) else {}
+
+    if isinstance(body, dict) and "message" in body and isinstance(body.get("message"), dict):
+        msg = body["message"]
+        tool_calls = msg.get("toolCalls")
+        if isinstance(tool_calls, list) and tool_calls and isinstance(tool_calls[0], dict):
+            tc = tool_calls[0]
+            tool_call_id = tc.get("id")
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            args = fn.get("arguments") if isinstance(fn.get("arguments"), dict) else args
+
+    return tool_call_id, args if isinstance(args, dict) else {}
+
+
+def _extract_inbound_call_id_from_vapi(body: dict) -> str | None:
+    """Prefer VAPI call id from wrapper payload."""
+    if not isinstance(body, dict):
+        return None
+    msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+    call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
+    call_id = call_obj.get("id") or msg.get("callId")
+    if isinstance(call_id, str) and call_id.strip():
+        return call_id.strip()
+    return None
+
+
+def _extract_inbound_caller_number_from_vapi(body: dict) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+    cust = msg.get("customer") if isinstance(msg.get("customer"), dict) else {}
+    call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
+    return (
+        cust.get("number")
+        or cust.get("phoneNumber")
+        or call_obj.get("from")
+        or call_obj.get("fromNumber")
+        or (call_obj.get("customer", {}) or {}).get("number")
+    )
+
+
+async def _upsert_inbound_calls_row(rid: str, payload: dict) -> tuple[dict | None, str | None]:
+    """
+    Single write path for inbound_calls. Does NOT touch outbound lead logic.
+    """
+    row, err = await supabase_upsert_inbound_call(payload)
+    if err:
+        logger.warning("[%s] inbound_calls upsert err=%s payload_keys=%s", rid, err, list(payload.keys()))
+    return row, err
+
+
+@router.post(
+    "/update-inbound-status",
+    summary="Inbound tool: upsert inbound_calls CRM row",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": inline_schema_refs(UpdateInboundStatusRequest.model_json_schema())}},
+            "required": True,
+        }
+    },
+)
+async def update_inbound_status(request: Request):
+    """
+    Inbound assistant tool endpoint.
+    Writes to public.inbound_calls using call_id as idempotency key.
+    Allowed crm_status values:
+      - in_progress
+      - follow_up
+      - manual_follow_up
+      - complete
+    """
+    try:
+        rid = str(uuid4())[:8]
+        body = await request.json()
+        logger.info("[%s] ======== update-inbound-status START ========", rid)
+        logger.info("[%s] update-inbound-status body=%s", rid, body)
+
+        tool_call_id, args = _extract_tool_args(body)
+        # Swagger / direct JSON support: allow passing the model shape.
+        # Tool wrapper also supported unchanged.
+        if isinstance(args, dict) and ("crm_status" in args):
+            # no-op: args already has what we need
+            pass
+
+        crm_status = (args.get("crm_status") or "").strip()
+        if crm_status not in _INBOUND_ALLOWED_CRM_STATUSES:
+            return build_vapi_response(
+                tool_call_id,
+                "crm_status must be one of: in_progress, follow_up, manual_follow_up, complete.",
+            )
+
+        call_id = (args.get("call_id") or "").strip() or (_extract_inbound_call_id_from_vapi(body) or "")
+        if not call_id:
+            return build_vapi_response(tool_call_id, "Missing call_id.")
+
+        caller_number = _normalize_phone(args.get("caller_number") or args.get("caller_phone") or _extract_inbound_caller_number_from_vapi(body))
+        caller_name = args.get("caller_name") or args.get("patient_name") or args.get("name")
+        appointment_id = args.get("appointment_id")
+        location = args.get("location")
+        route = args.get("route")
+        notes = args.get("notes") or args.get("summary")
+
+        now_iso = datetime.utcnow().isoformat()
+        payload = {
+            "call_id": call_id,
+            "crm_status": crm_status,
+            "caller_number": caller_number,
+            "caller_name": caller_name,
+            "appointment_id": appointment_id,
+            "location": location,
+            "route": route,
+            "notes": notes,
+            "updated_at": now_iso,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None and v != ""}
+
+        await _upsert_inbound_calls_row(rid, payload)
+
+        return build_vapi_response(tool_call_id, f"Inbound call {call_id} saved with crm_status={crm_status}.")
+    except Exception as e:
+        logger.exception("Error in /update-inbound-status: %s", e)
+        return build_vapi_response(
+            locals().get("tool_call_id"),
+            "Sorry, there was an error updating inbound status. Please try again.",
+        )
+
+
+@router.post("/inbound-call-event", summary="Inbound tool alias: update-inbound-status")
+async def inbound_call_event(request: Request):
+    # Backward-compatible alias (some VAPI tools may still point here).
+    return await update_inbound_status(request)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,9 +381,40 @@ async def vapi_webhook(request: Request):
         variable_values = overrides.get("variableValues", {})
         lead_id         = variable_values.get("lead_id")
         appointment_id  = variable_values.get("appointment_id")
+        is_inbound = _is_inbound_vapi_call(call_obj, variable_values)
 
         logger.info("[%s] vapi-webhook end-of-call-report call_id=%s assistant=%s ended=%s lead_id=%s duration=%s",
                     rid, call_id, assistant_id, ended_reason, lead_id, duration_seconds)
+
+        # ── Inbound fallback persistence (does not touch outbound lead updates) ──
+        # Prefer Vapi call.type == inboundPhoneCall, fallback to inbound assistant id marker.
+        if is_inbound or (VAPI_INBOUND_ASSISTANT_ID and str(assistant_id).lower() == str(VAPI_INBOUND_ASSISTANT_ID).lower()):
+            try:
+                existing = await supabase_fetch_inbound_call_by_call_id(call_id) if call_id else None
+                # Keep inbound simple for now: unresolved -> follow_up; else keep existing crm_status if present.
+                crm_status = "follow_up"
+                if existing and existing.get("crm_status") in _INBOUND_ALLOWED_CRM_STATUSES:
+                    crm_status = existing["crm_status"]
+
+                inbound_payload = {
+                    "call_id": call_id,
+                    "crm_status": crm_status,
+                    "appointment_id": appointment_id if appointment_id and not str(appointment_id).startswith("{{") else None,
+                    "caller_name": variable_values.get("caller_name") or variable_values.get("patient_name") or variable_values.get("name"),
+                    "caller_number": _normalize_phone(variable_values.get("caller_number") or variable_values.get("patient_phone") or variable_values.get("from_number") or call_obj.get("from") or call_obj.get("fromNumber")),
+                    "started_at": started_at or None,
+                    "ended_at": ended_at or None,
+                    "duration_seconds": duration_seconds,
+                    "route": variable_values.get("route") or variable_values.get("intent"),
+                    "location": variable_values.get("location"),
+                    "notes": (summary or None),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+                inbound_payload = {k: v for k, v in inbound_payload.items() if v is not None and v != ""}
+                await _upsert_inbound_calls_row(rid, inbound_payload)
+            except Exception as _ie:
+                logger.warning("[%s] inbound fallback persist error: %s", rid, _ie)
+            return JSONResponse(content={"ok": True, "direction": "inbound"})
 
         # ── SMS notification (Twilio) for successful appointment outcomes ──
         # This runs on end-of-call reports and is safe to skip if not configured.
