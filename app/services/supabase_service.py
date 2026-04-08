@@ -262,6 +262,80 @@ async def supabase_upsert_inbound_call(data: dict) -> tuple[dict | None, str | N
         return None, "write_failed"
 
 
+async def supabase_fetch_latest_inbound_by_caller_number(caller_number: str) -> dict | None:
+    """
+    Return the most recent complete inbound_calls row for a given caller_number.
+    Used to detect a returning caller who wants to reschedule a previously booked appointment.
+    """
+    if not caller_number:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/inbound_calls",
+                headers=SUPABASE_HEADERS,
+                params=[
+                    ("select", "id,call_id,crm_status,caller_name,caller_number,appointment_id,route,location,notes,created_at"),
+                    ("caller_number", f"eq.{caller_number}"),
+                    ("crm_status", "eq.complete"),
+                    ("order", "created_at.desc"),
+                    ("limit", "1"),
+                ],
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                return rows[0] if rows else None
+            logger.error("[supabase] fetch_latest_inbound_by_caller_number failed status=%s body=%s",
+                         r.status_code, r.text[:300])
+            return None
+    except Exception as e:
+        logger.error("[supabase] fetch_latest_inbound_by_caller_number exception: %s", e)
+        return None
+
+
+async def supabase_update_inbound_call_by_id(row_id: str, data: dict) -> bool:
+    """PATCH an inbound_calls row by its primary key id. Returns True on success."""
+    if not row_id:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.patch(
+                f"{SUPABASE_URL}/rest/v1/inbound_calls?id=eq.{row_id}",
+                headers=SUPABASE_HEADERS,
+                json=data,
+            )
+            if r.status_code in (200, 204):
+                return True
+            logger.error("[supabase] update_inbound_call_by_id failed status=%s body=%s",
+                         r.status_code, r.text[:300])
+            return False
+    except Exception as e:
+        logger.error("[supabase] update_inbound_call_by_id exception: %s", e)
+        return False
+
+
+async def supabase_fetch_inbound_call_by_call_id(call_id: str) -> dict | None:
+    """Fetch one inbound_calls row by call_id."""
+    if not call_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/inbound_calls?call_id=eq.{call_id}"
+                "&select=id,call_id,crm_status,caller_name,caller_number,appointment_id,location,notes,updated_at",
+                headers=SUPABASE_HEADERS,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                return rows[0] if rows else None
+            logger.error("[supabase] fetch_inbound_call_by_call_id failed status=%s body=%s",
+                         r.status_code, r.text[:300])
+            return None
+    except Exception as e:
+        logger.error("[supabase] fetch_inbound_call_by_call_id exception: %s", e)
+        return None
+
+
 async def _insert_call_log(
     rid: str,
     lead_id: str,

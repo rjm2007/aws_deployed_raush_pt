@@ -193,6 +193,8 @@ Upserts inbound call events into `inbound_calls` and mirrors CRM status to the l
 | `crm_status` | ✅ | `in_progress` | Allowed: `in_progress`, `follow_up`, `manual_follow_up`, `complete` |
 | `lead_id` | ❌ | `uuid-here` | If provided, mirrors status to `leads.queue_status` |
 | `appointment_id` | ❌ | `uuid-here` | Optional linked appointment UUID |
+| `caller_name` | ❌ | `John Smith` | Caller display/full name |
+| `caller_number` | ❌ | `9491234567` | Primary caller number field |
 | `caller_phone` | ❌ | `9491234567` | Caller number |
 | `called_number` | ❌ | `9495550000` | Dialed clinic number |
 | `vapi_call_id` | ❌ | `call_provider_id` | Provider call id |
@@ -208,6 +210,10 @@ Upserts inbound call events into `inbound_calls` and mirrors CRM status to the l
 If the `inbound_calls` table does not exist yet, apply:
 
 `sql/2026-04-07_create_inbound_calls.sql`
+
+If `inbound_calls` already exists and you want name/number fields for CRM display, apply:
+
+`sql/2026-04-08_add_inbound_contact_columns.sql`
 
 ---
 
