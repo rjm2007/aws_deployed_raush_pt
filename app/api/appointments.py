@@ -1180,7 +1180,7 @@ async def inbound_lookup_appointments(request: Request):
             return build_vapi_response(tool_call_id, "patient_full_name cannot be empty.")
 
         date_s = str(date).strip()
-        if not re.match(r"^\\d{4}-\\d{2}-\\d{2}$", date_s):
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_s):
             return build_vapi_response(
                 tool_call_id,
                 f"I need the appointment date in YYYY-MM-DD format. You said '{date}'.",
