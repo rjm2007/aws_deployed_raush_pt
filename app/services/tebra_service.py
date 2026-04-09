@@ -1,12 +1,14 @@
 import re
 import httpx
+from xml.sax.saxutils import escape
 
 from app.core.config import (
     TEBRA_URL, CUSTOMER_KEY, TEBRA_PASSWORD, TEBRA_USER,
     PRACTICE_ID, PROVIDER_ID, RESOURCE_ID,
+    TEBRA_TIMEZONE_OFFSET_FROM_GMT,
 )
 from app.core.logger import logger
-from app.utils.time_utils import parse_time_to_24hr, to_utc_string
+from app.utils.time_utils import parse_time_to_24hr, to_utc_string, parse_tebra_local_start_datetime, format_12hr
 from app.utils.parser import parse_soap_fault
 
 
@@ -51,6 +53,149 @@ async def call_tebra_get_appointments(date: str, tebra_location_name: str) -> st
         logger.info("[tebra] GetAppointments status=%s length=%s", r.status_code, len(r.text))
         logger.info("[tebra] GetAppointments raw=%s", r.text)
         return r.text
+
+
+_APPT_DATA_TAGS = (
+    "ID",
+    "PatientID",
+    "PatientFullName",
+    "StartDate",
+    "EndDate",
+    "AppointmentDuration",
+    "AppointmentReason1",
+    "ConfirmationStatus",
+    "ResourceName1",
+    "ServiceLocationName",
+    "Notes",
+    "PracticeName",
+)
+
+
+def _extract_tag(block: str, tag: str) -> str | None:
+    m = re.search(rf"<{tag}>([^<]*)</{tag}>", block)
+    if not m:
+        return None
+    s = m.group(1).strip()
+    return s if s else None
+
+
+def _parse_get_appointments_blocks(xml: str) -> list[dict]:
+    blocks = re.findall(r"<AppointmentData>(.*?)</AppointmentData>", xml, re.DOTALL)
+    out = []
+    for b in blocks:
+        row = {t: _extract_tag(b, t) for t in _APPT_DATA_TAGS}
+        tid = row.get("ID")
+        if not tid:
+            continue
+        parsed = None
+        sd = row.get("StartDate")
+        if sd:
+            parsed = parse_tebra_local_start_datetime(sd)
+        appt_date = parsed[0] if parsed else None
+        time_12 = format_12hr(parsed[1], parsed[2]) if parsed else None
+        time_24 = f"{parsed[1]:02d}:{parsed[2]:02d}" if parsed else None
+        out.append({
+            "tebra_appointment_id": tid,
+            "patient_id":           row.get("PatientID"),
+            "patient_full_name":    row.get("PatientFullName"),
+            "start_date_raw":       sd,
+            "appointment_date":     appt_date,
+            "appointment_time_12hr": time_12,
+            "appointment_time_24hr": time_24,
+            "end_date_raw":         row.get("EndDate"),
+            "service_location_name": row.get("ServiceLocationName"),
+            "appointment_reason":   row.get("AppointmentReason1"),
+            "confirmation_status":  row.get("ConfirmationStatus"),
+            "resource_name":        row.get("ResourceName1"),
+            "notes":                row.get("Notes"),
+            "practice_name":        row.get("PracticeName"),
+        })
+    return out
+
+
+async def call_tebra_get_appointments_by_patient(
+    patient_full_name: str,
+    start_date: str,
+    end_date: str,
+    timezone_offset_from_gmt: int | None = None,
+    rid: str = "?",
+) -> dict:
+    """
+    Tebra GetAppointments filtered by patient name and calendar date range (inclusive).
+    start_date / end_date: YYYY-MM-DD.
+    """
+    tz = timezone_offset_from_gmt if timezone_offset_from_gmt is not None else TEBRA_TIMEZONE_OFFSET_FROM_GMT
+    safe_name = escape((patient_full_name or "").strip())
+    soap_body = f"""<?xml version="1.0" encoding="utf-8"?>
+<soapenv:Envelope
+  xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+  xmlns:sch="http://www.kareo.com/api/schemas/">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <sch:GetAppointments>
+      <sch:request>
+        <sch:RequestHeader>
+          <sch:ClientVersion>1</sch:ClientVersion>
+          <sch:CustomerKey>{CUSTOMER_KEY}</sch:CustomerKey>
+          <sch:Password>{TEBRA_PASSWORD}</sch:Password>
+          <sch:User>{TEBRA_USER}</sch:User>
+        </sch:RequestHeader>
+        <sch:Fields>
+          <sch:ID>true</sch:ID>
+          <sch:PatientID>true</sch:PatientID>
+          <sch:PatientFullName>true</sch:PatientFullName>
+          <sch:StartDate>true</sch:StartDate>
+          <sch:EndDate>true</sch:EndDate>
+          <sch:AppointmentDuration>true</sch:AppointmentDuration>
+          <sch:AppointmentReason1>true</sch:AppointmentReason1>
+          <sch:ConfirmationStatus>true</sch:ConfirmationStatus>
+          <sch:ResourceName1>true</sch:ResourceName1>
+          <sch:ServiceLocationName>true</sch:ServiceLocationName>
+          <sch:Notes>true</sch:Notes>
+          <sch:PracticeName>true</sch:PracticeName>
+        </sch:Fields>
+        <sch:Filter>
+          <sch:PatientFullName>{safe_name}</sch:PatientFullName>
+          <sch:StartDate>{start_date}</sch:StartDate>
+          <sch:EndDate>{end_date}</sch:EndDate>
+          <sch:TimeZoneOffsetFromGMT>{tz}</sch:TimeZoneOffsetFromGMT>
+        </sch:Filter>
+      </sch:request>
+    </sch:GetAppointments>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://www.kareo.com/api/schemas/KareoServices/GetAppointments",
+    }
+    logger.info(
+        "[%s] GetAppointments by patient name=%s range=%s..%s tz=%s",
+        rid, patient_full_name, start_date, end_date, tz,
+    )
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(TEBRA_URL, content=soap_body, headers=headers)
+        xml = r.text
+    logger.info("[%s] GetAppointments-by-patient status=%s len=%s", rid, r.status_code, len(xml))
+
+    fault = parse_soap_fault(xml)
+    if fault:
+        logger.error("[%s] GetAppointments-by-patient fault=%s", rid, fault)
+        return {"ok": False, "fault": fault, "error_message": fault, "appointments": []}
+
+    is_error = re.search(r"<IsError>(true|false)</IsError>", xml)
+    if is_error and is_error.group(1).lower() == "true":
+        err = re.search(r"<ErrorMessage>([^<]*)</ErrorMessage>", xml)
+        msg = (err.group(1).strip() if err else "") or "Tebra GetAppointments error"
+        logger.error("[%s] GetAppointments-by-patient IsError=%s", rid, msg)
+        return {"ok": False, "fault": None, "error_message": msg, "appointments": []}
+
+    auth = re.search(r"<Authenticated>(true|false)</Authenticated>", xml)
+    if auth and auth.group(1).lower() != "true":
+        logger.error("[%s] GetAppointments-by-patient not authenticated", rid)
+        return {"ok": False, "fault": None, "error_message": "Not authenticated with Tebra", "appointments": []}
+
+    appointments = _parse_get_appointments_blocks(xml)
+    return {"ok": True, "fault": None, "error_message": None, "appointments": appointments}
 
 
 async def get_patient_by_name(first_name: str, last_name: str, rid: str = "?") -> str | None:

@@ -106,6 +106,39 @@ def format_12hr(h: int, mn: int) -> str:
     return f"{display_h}:{str(mn).zfill(2)} {ampm}"
 
 
+def parse_tebra_local_start_datetime(raw: str | None) -> tuple[str, int, int] | None:
+    """
+    Parse Tebra GetAppointments StartDate field which is typically local clinic time, like:
+      "4/17/2026 9:30:00 AM"
+    Returns (YYYY-MM-DD, hour24, minute) or None.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # Expected: M/D/YYYY H:MM:SS AM|PM
+    if " " not in s or "/" not in s:
+        return None
+    parts = s.split(" ")
+    if len(parts) < 3:
+        return None
+    try:
+        mdy = parts[0].split("/")
+        month, day, year = int(mdy[0]), int(mdy[1]), int(mdy[2])
+        hms = parts[1].split(":")
+        h, mn = int(hms[0]), int(hms[1])
+        ampm = parts[2].upper()
+        if ampm == "PM" and h != 12:
+            h += 12
+        if ampm == "AM" and h == 12:
+            h = 0
+        date_s = f"{year:04d}-{month:02d}-{day:02d}"
+        return (date_s, h, mn)
+    except Exception:
+        return None
+
+
 def to_utc_string(date: str, h: int, mn: int) -> str:
     """Convert clinic local time (PDT = UTC-7) to UTC ISO string for Tebra API."""
     local_dt = datetime(

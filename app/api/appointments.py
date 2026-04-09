@@ -29,6 +29,7 @@ from app.core.config import (
 from app.core.logger import logger
 from app.services.tebra_service import (
     call_tebra_get_appointments,
+    call_tebra_get_appointments_by_patient,
     get_patient_by_name,
     create_patient,
     create_appointment_in_tebra,
@@ -1264,8 +1265,86 @@ async def inbound_lookup_appointments(request: Request):
             if norm:
                 appts.append(norm)
 
-        summary = _format_inbound_lookup_summary(appts, "supabase")
-        return build_vapi_response(tool_call_id, summary)
+        if appts:
+            summary = _format_inbound_lookup_summary(appts, "supabase")
+            return build_vapi_response(tool_call_id, summary)
+
+        # ── Tebra fallback (patient name + exact slot) ─────────────────────────
+        tz_override = args.get("timezone_offset_from_gmt")
+        tz_int = None
+        if tz_override is not None and str(tz_override).strip() != "":
+            try:
+                tz_int = int(tz_override)
+            except (TypeError, ValueError):
+                return build_vapi_response(
+                    tool_call_id,
+                    f"timezone_offset_from_gmt must be an integer. You said '{tz_override}'.",
+                )
+
+        tebra_result = await call_tebra_get_appointments_by_patient(
+            patient_full_name=name_clean,
+            start_date=date_s,
+            end_date=date_s,
+            timezone_offset_from_gmt=tz_int,
+            rid=rid,
+        )
+        if not tebra_result.get("ok"):
+            err = tebra_result.get("error_message") or "Tebra lookup failed."
+            return build_vapi_response(tool_call_id, f"Could not look up appointments in Tebra: {err}")
+
+        target_name = _normalize_person_name_key(name_clean)
+        matches: list[dict] = []
+        for a in tebra_result.get("appointments") or []:
+            if (a.get("appointment_date") != date_s):
+                continue
+            h24 = a.get("appointment_time_24hr") or ""
+            if not (isinstance(h24, str) and len(h24) >= 5):
+                continue
+            try:
+                hh, mm = int(h24.split(":")[0]), int(h24.split(":")[1])
+            except Exception:
+                continue
+            if hh != hour or mm != minute:
+                continue
+            pf = _normalize_person_name_key(a.get("patient_full_name") or "")
+            # keep only plausible matches; fuzzy already handled in supabase phone-first
+            if pf and target_name and (_fuzzy_ratio(target_name, pf) >= 0.86):
+                matches.append(a)
+
+        if not matches:
+            return build_vapi_response(
+                tool_call_id,
+                "No appointments found for that exact name, date, and time in clinic records or Tebra.",
+            )
+
+        # If multiple, pick the best fuzzy match.
+        matches.sort(key=lambda m: _fuzzy_ratio(target_name, _normalize_person_name_key(m.get("patient_full_name") or "")), reverse=True)
+        best = matches[0]
+        tebra_id = best.get("tebra_appointment_id")
+
+        # Try to also map to a Supabase appointment_id if that Tebra ID exists in appointments.
+        supabase_id = None
+        if tebra_id:
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    r = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/appointments?tebra_appointment_id=eq.{tebra_id}"
+                        f"&select=id&limit=1",
+                        headers=SUPABASE_HEADERS,
+                    )
+                    if r.status_code == 200 and (r.json() or []):
+                        supabase_id = (r.json() or [None])[0].get("id")
+            except Exception as _e:
+                logger.warning("[%s] tebra->supabase mapping lookup error: %s", rid, _e)
+
+        loc = best.get("service_location_name") or "unknown location"
+        time_12 = best.get("appointment_time_12hr") or best.get("appointment_time_24hr") or "unknown time"
+        msg = (
+            f"Found 1 appointment via Tebra. "
+            f"tebra_id {tebra_id}: {date_s} at {time_12} — {loc}"
+            f"{f' appointment_id:{supabase_id}' if supabase_id else ''}"
+        )
+        return build_vapi_response(tool_call_id, msg)
     except Exception as e:
         logger.exception("Error in /inbound-lookup-appointments: %s", e)
         return build_vapi_response(

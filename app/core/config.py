@@ -84,6 +84,9 @@ APPOINTMENT_REASON_MAP = {
 # Change CLINIC_TZ_OFFSET to -8 in November.
 CLINIC_TZ_OFFSET = timedelta(hours=-7)   # Pacific Daylight Time
 
+# Kareo/Tebra GetAppointments patient filter: hours offset from GMT (Pacific PDT ≈ 7).
+TEBRA_TIMEZONE_OFFSET_FROM_GMT = int(os.getenv("TEBRA_TIMEZONE_OFFSET_FROM_GMT", "7"))
+
 
 # ─── Resolver Helpers ─────────────────────────────────────────────────────────
 
