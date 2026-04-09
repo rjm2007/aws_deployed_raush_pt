@@ -3,8 +3,6 @@ import asyncio
 import httpx
 from datetime import datetime
 from uuid import uuid4
-from difflib import SequenceMatcher
-
 from fastapi import APIRouter, Request
 
 from app.models.requests import (
@@ -41,6 +39,7 @@ from app.services.supabase_service import (
     supabase_update_appointment,
     supabase_update_lead,
     supabase_fetch_appointments_by_patient_date_time,
+    inbound_lookup_first_name_key,
 )
 from app.services.appointment_sms_service import send_appointment_sms_if_needed
 from app.utils.time_utils import (
@@ -72,41 +71,6 @@ def _normalize_person_name_key(raw: str | None) -> str:
     if not raw:
         return ""
     return " ".join(str(raw).strip().lower().split())
-
-
-def _sb_row_time_hm(raw) -> tuple[int, int] | None:
-    if raw is None:
-        return None
-    ts = str(raw).strip()
-    if not ts:
-        return None
-    seg = ts.split(":")
-    if len(seg) < 2:
-        return None
-    try:
-        return int(seg[0]), int(seg[1])
-    except ValueError:
-        return None
-
-
-def _extract_caller_number_from_vapi(body: dict) -> str | None:
-    """Try to read inbound caller number from VAPI wrapper payload."""
-    if not isinstance(body, dict):
-        return None
-    msg = body.get("message") if isinstance(body.get("message"), dict) else {}
-    cust = msg.get("customer") if isinstance(msg.get("customer"), dict) else {}
-    call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
-    return (
-        cust.get("number")
-        or cust.get("phoneNumber")
-        or call_obj.get("from")
-        or call_obj.get("fromNumber")
-        or (call_obj.get("customer", {}) or {}).get("number")
-    )
-
-
-def _fuzzy_ratio(a: str, b: str) -> float:
-    return SequenceMatcher(None, a, b).ratio()
 
 
 def _inbound_row_from_supabase(row: dict) -> dict | None:
@@ -1145,8 +1109,8 @@ async def cancel_appointment(request: Request):
 )
 async def inbound_lookup_appointments(request: Request):
     """
-    Inbound helper endpoint for the inbound assistant.
-    This is intentionally strict (no fuzzy matching) to avoid returning wrong appointment IDs.
+    Inbound helper: resolve Tebra + Supabase appointment IDs using FIRST name only (first token),
+    plus appointment date and time. Phone / caller-ID matching is not used.
     """
     try:
         rid = str(uuid4())[:8]
@@ -1165,7 +1129,6 @@ async def inbound_lookup_appointments(request: Request):
         name = args.get("patient_full_name") or args.get("name") or args.get("patient_name")
         date = args.get("date") or args.get("appointment_date")
         time_str = args.get("time") or args.get("appointment_time")
-        caller_number = args.get("caller_number") or args.get("caller_phone") or args.get("patient_phone") or _extract_caller_number_from_vapi(body)
 
         missing = [k for k, v in {
             "patient_full_name": name,
@@ -1194,67 +1157,6 @@ async def inbound_lookup_appointments(request: Request):
             )
         hour, minute = parsed_time
 
-        # ── Preferred path: caller_number (phone) + date + time, then safe fuzzy on name ──
-        phone_digits = _normalize_phone_digits(caller_number) if caller_number else None
-        if phone_digits:
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    r = await client.get(
-                        f"{SUPABASE_URL}/rest/v1/appointments",
-                        headers=SUPABASE_HEADERS,
-                        params=[
-                            ("select", "id,tebra_appointment_id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status"),
-                            ("patient_phone", f"eq.{phone_digits}"),
-                            ("appointment_date", f"eq.{date_s}"),
-                            ("tebra_appointment_id", "not.is.null"),
-                            ("or", f"(practice_id.eq.{SUPABASE_PRACTICE_ID},practice_id.is.null)"),
-                            ("order", "appointment_time.asc"),
-                        ],
-                    )
-                if r.status_code == 200:
-                    rows = r.json() or []
-                    # Keep exact clock time matches only.
-                    time_matches = []
-                    for row in rows:
-                        hm = _sb_row_time_hm(row.get("appointment_time"))
-                        if hm and hm[0] == hour and hm[1] == minute:
-                            time_matches.append(row)
-
-                    if time_matches:
-                        # If only one row matches the slot, return it.
-                        if len(time_matches) == 1:
-                            appt = _inbound_row_from_supabase(time_matches[0])
-                            summary = _format_inbound_lookup_summary([appt] if appt else [], "supabase")
-                            return build_vapi_response(tool_call_id, summary)
-
-                        # Safe fuzzy: pick best name match if it is clearly dominant.
-                        target = _normalize_person_name_key(name_clean)
-                        scored = []
-                        for row in time_matches:
-                            cand = _normalize_person_name_key(row.get("patient_name") or "")
-                            if not cand:
-                                continue
-                            scored.append((row, _fuzzy_ratio(target, cand)))
-                        scored.sort(key=lambda t: t[1], reverse=True)
-
-                        if scored:
-                            best_row, best_score = scored[0]
-                            second_score = scored[1][1] if len(scored) > 1 else 0.0
-
-                            # Conservative thresholds to avoid wrong matches.
-                            if best_score >= 0.86 and (best_score - second_score) >= 0.08:
-                                appt = _inbound_row_from_supabase(best_row)
-                                summary = _format_inbound_lookup_summary([appt] if appt else [], "supabase")
-                                return build_vapi_response(tool_call_id, summary)
-
-                        return build_vapi_response(
-                            tool_call_id,
-                            "I found multiple appointments for that phone number at that exact date and time. "
-                            "Please ask the caller to confirm the appointment location.",
-                        )
-            except Exception as _e:
-                logger.warning("[%s] inbound lookup phone-first error: %s", rid, _e)
-
         sb_rows = await supabase_fetch_appointments_by_patient_date_time(
             name_clean, date_s, hour, minute,
         )
@@ -1266,10 +1168,16 @@ async def inbound_lookup_appointments(request: Request):
                 appts.append(norm)
 
         if appts:
+            if len(appts) > 1:
+                return build_vapi_response(
+                    tool_call_id,
+                    "I found multiple appointments for that first name at that exact date and time. "
+                    "Please ask the caller to confirm their last name or location.",
+                )
             summary = _format_inbound_lookup_summary(appts, "supabase")
             return build_vapi_response(tool_call_id, summary)
 
-        # ── Tebra fallback (patient name + exact slot) ─────────────────────────
+        # ── Tebra fallback (first name only in API filter + exact slot) ───────
         tz_override = args.get("timezone_offset_from_gmt")
         tz_int = None
         if tz_override is not None and str(tz_override).strip() != "":
@@ -1281,8 +1189,15 @@ async def inbound_lookup_appointments(request: Request):
                     f"timezone_offset_from_gmt must be an integer. You said '{tz_override}'.",
                 )
 
+        tebra_first = inbound_lookup_first_name_key(name_clean)
+        if not tebra_first:
+            return build_vapi_response(
+                tool_call_id,
+                "I need a patient first name to look up the appointment.",
+            )
+
         tebra_result = await call_tebra_get_appointments_by_patient(
-            patient_full_name=name_clean,
+            patient_full_name=tebra_first,
             start_date=date_s,
             end_date=date_s,
             timezone_offset_from_gmt=tz_int,
@@ -1292,7 +1207,7 @@ async def inbound_lookup_appointments(request: Request):
             err = tebra_result.get("error_message") or "Tebra lookup failed."
             return build_vapi_response(tool_call_id, f"Could not look up appointments in Tebra: {err}")
 
-        target_name = _normalize_person_name_key(name_clean)
+        target_first = inbound_lookup_first_name_key(name_clean)
         matches: list[dict] = []
         for a in tebra_result.get("appointments") or []:
             if (a.get("appointment_date") != date_s):
@@ -1306,19 +1221,23 @@ async def inbound_lookup_appointments(request: Request):
                 continue
             if hh != hour or mm != minute:
                 continue
-            pf = _normalize_person_name_key(a.get("patient_full_name") or "")
-            # keep only plausible matches; fuzzy already handled in supabase phone-first
-            if pf and target_name and (_fuzzy_ratio(target_name, pf) >= 0.86):
+            cand_first = inbound_lookup_first_name_key(a.get("patient_full_name") or "")
+            if cand_first and target_first and cand_first == target_first:
                 matches.append(a)
 
         if not matches:
             return build_vapi_response(
                 tool_call_id,
-                "No appointments found for that exact name, date, and time in clinic records or Tebra.",
+                "No appointments found for that first name, date, and time in clinic records or Tebra.",
             )
 
-        # If multiple, pick the best fuzzy match.
-        matches.sort(key=lambda m: _fuzzy_ratio(target_name, _normalize_person_name_key(m.get("patient_full_name") or "")), reverse=True)
+        if len(matches) > 1:
+            return build_vapi_response(
+                tool_call_id,
+                "I found multiple Tebra appointments for that first name at that exact date and time. "
+                "Please ask the caller to confirm their last name or location.",
+            )
+
         best = matches[0]
         tebra_id = best.get("tebra_appointment_id")
 

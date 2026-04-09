@@ -168,7 +168,11 @@ class UpdateInboundStatusRequest(BaseModel):
 
 
 class InboundLookupAppointmentsRequest(BaseModel):
-    patient_full_name: str = Field(..., example="John Smith", description="Patient full name")
+    patient_full_name: str = Field(..., example="John Smith", description="Patient name; only the first name (first word) is used for lookup")
     date: str = Field(..., example="2026-04-15", description="Appointment date in YYYY-MM-DD")
     time: str = Field(..., example="10:00", description="Appointment time in HH:MM or natural format like '7 PM'")
-    caller_number: Optional[str] = Field(None, example="9495551212", description="Optional. Caller digits to enable phone-first matching")
+    caller_number: Optional[str] = Field(
+        None,
+        example="9495551212",
+        description="Deprecated / ignored. Matching uses first name + date + time only.",
+    )

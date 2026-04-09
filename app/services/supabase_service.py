@@ -25,6 +25,16 @@ def _normalize_person_name_key(raw: str | None) -> str:
     return " ".join(str(raw).strip().lower().split())
 
 
+def inbound_lookup_first_name_key(raw: str | None) -> str:
+    """First whitespace-separated token, lowercased (inbound lookup name matching)."""
+    if not raw:
+        return ""
+    parts = str(raw).strip().split()
+    if not parts:
+        return ""
+    return parts[0].strip().lower()
+
+
 def _sb_row_time_hm(raw) -> tuple[int, int] | None:
     if raw is None:
         return None
@@ -105,13 +115,13 @@ async def supabase_fetch_appointments_by_patient_date_time(
     time_minute: int,
 ) -> list[dict]:
     """
-    Fetch appointments on a single calendar day, then keep rows where patient_name matches exactly
-    (case-insensitive, whitespace-normalized) AND clock time matches.
+    Fetch appointments on a single calendar day, then keep rows where the patient's FIRST name
+    matches (case-insensitive first token only) AND clock time matches.
     """
     if not patient_name or not appointment_date:
         return []
-    name_key = _normalize_person_name_key(patient_name)
-    if not name_key:
+    first_key = _first_name_key(patient_name)
+    if not first_key:
         return []
 
     params = [
@@ -145,8 +155,8 @@ async def supabase_fetch_appointments_by_patient_date_time(
 
     out: list[dict] = []
     for row in rows:
-        row_name_key = _normalize_person_name_key(row.get("patient_name") or "")
-        if row_name_key != name_key:
+        row_first = inbound_lookup_first_name_key(row.get("patient_name") or "")
+        if row_first != first_key:
             continue
         hm = _sb_row_time_hm(row.get("appointment_time"))
         if not hm or hm[0] != time_hour or hm[1] != time_minute:
