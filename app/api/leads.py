@@ -89,15 +89,29 @@ def _extract_tool_args(body: dict) -> tuple[str | None, dict]:
     return tool_call_id, args if isinstance(args, dict) else {}
 
 
-def _extract_inbound_call_id_from_vapi(body: dict) -> str | None:
-    """Prefer VAPI call id from wrapper payload."""
+def _extract_inbound_call_id_from_vapi(body: dict, request: Request | None = None) -> str | None:
+    """VAPI phone: message.call.id. VAPI chat widget: body.chat.id or message.chat.id. Optional header X-Chat-Id."""
     if not isinstance(body, dict):
         return None
+    chat_top = body.get("chat")
+    if isinstance(chat_top, dict):
+        cid = chat_top.get("id")
+        if isinstance(cid, str) and cid.strip():
+            return cid.strip()
     msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+    chat_msg = msg.get("chat")
+    if isinstance(chat_msg, dict):
+        cid = chat_msg.get("id")
+        if isinstance(cid, str) and cid.strip():
+            return cid.strip()
     call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
     call_id = call_obj.get("id") or msg.get("callId")
     if isinstance(call_id, str) and call_id.strip():
         return call_id.strip()
+    if request is not None:
+        h = request.headers.get("X-Chat-Id") or request.headers.get("x-chat-id")
+        if isinstance(h, str) and h.strip():
+            return h.strip()
     return None
 
 
@@ -166,7 +180,9 @@ async def update_inbound_status(request: Request):
                 "crm_status must be one of: in_progress, follow_up, manual_follow_up, complete.",
             )
 
-        call_id = (args.get("call_id") or "").strip() or (_extract_inbound_call_id_from_vapi(body) or "")
+        call_id = (args.get("call_id") or "").strip() or (
+            _extract_inbound_call_id_from_vapi(body, request) or ""
+        )
         if not call_id:
             return build_vapi_response(tool_call_id, "Missing call_id.")
 

@@ -120,7 +120,7 @@ async def supabase_fetch_appointments_by_patient_date_time(
     """
     if not patient_name or not appointment_date:
         return []
-    first_key = _first_name_key(patient_name)
+    first_key = inbound_lookup_first_name_key(patient_name)
     if not first_key:
         return []
 
