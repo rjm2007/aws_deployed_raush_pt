@@ -87,6 +87,14 @@ CLINIC_TZ_OFFSET = timedelta(hours=-7)   # Pacific Daylight Time
 # Kareo/Tebra GetAppointments patient filter: hours offset from GMT (Pacific PDT ≈ 7).
 TEBRA_TIMEZONE_OFFSET_FROM_GMT = int(os.getenv("TEBRA_TIMEZONE_OFFSET_FROM_GMT", "7"))
 
+# Inbound lookup: GetAppointments by PatientID is scoped to one Tebra practice name (SOAP Filter).
+TEBRA_INBOUND_APPOINTMENTS_PRACTICE_NAME = os.getenv(
+    "TEBRA_INBOUND_APPOINTMENTS_PRACTICE_NAME",
+    "Rausch Physical Therapy, Inc",
+)
+# Calendar window in America/Los_Angeles for listing upcoming appointments (today → +N days).
+TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS = int(os.getenv("TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS", "90"))
+
 
 # ─── Resolver Helpers ─────────────────────────────────────────────────────────
 

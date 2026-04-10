@@ -114,7 +114,11 @@ class UpdateAppointmentStatusRequest(BaseModel):
 
 class RescheduleAppointmentRequest(BaseModel):
     tebra_appointment_id: str = Field(..., example="33463", description="Old Tebra appointment ID")
-    appointment_id: str = Field(..., description="Supabase appointment UUID of the old appointment")
+    appointment_id: Optional[str] = Field(
+        None,
+        description="Supabase UUID of the old appointment when we have it (form/outbound bookings). "
+        "Omit when the visit exists only in Tebra (e.g. staff booked at front desk); Tebra reschedule still runs and a new Supabase row can be created.",
+    )
     new_date: str = Field(..., example="2026-04-16", description="New date in YYYY-MM-DD format")
     new_time: str = Field(..., example="10:00", description="New time in HH:MM 24-hour format")
     location: Optional[str] = Field(None, example="Dana Point", description="New clinic location (defaults to same)")
@@ -168,11 +172,32 @@ class UpdateInboundStatusRequest(BaseModel):
 
 
 class InboundLookupAppointmentsRequest(BaseModel):
-    patient_full_name: str = Field(..., example="John Smith", description="Patient name; only the first name (first word) is used for lookup")
-    date: str = Field(..., example="2026-04-15", description="Appointment date in YYYY-MM-DD")
-    time: str = Field(..., example="10:00", description="Appointment time in HH:MM or natural format like '7 PM'")
+    patient_full_name: str = Field(
+        ...,
+        example="Jane Doe",
+        description="Patient first and last name (spell both). Used with Tebra GetPatients, then GetAppointments by PatientID.",
+    )
+    selected_tebra_appointment_id: Optional[str] = Field(
+        None,
+        example="33735",
+        description="Optional. If the list response was ambiguous, call again with the chosen tebra_appointment_id; otherwise use IDs from the list and go straight to reschedule_appointment.",
+    )
+    date: Optional[str] = Field(
+        None,
+        example="2026-04-15",
+        description="Deprecated; ignored. Date range is server-side (today → +90 days Pacific).",
+    )
+    time: Optional[str] = Field(
+        None,
+        example="10:00",
+        description="Deprecated; ignored.",
+    )
+    timezone_offset_from_gmt: Optional[int] = Field(
+        None,
+        description="Optional override for Tebra Filter TimeZoneOffsetFromGMT (default from server env).",
+    )
     caller_number: Optional[str] = Field(
         None,
         example="9495551212",
-        description="Deprecated / ignored. Matching uses first name + date + time only.",
+        description="Ignored.",
     )

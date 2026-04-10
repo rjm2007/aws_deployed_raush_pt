@@ -1,8 +1,9 @@
 import re
 import asyncio
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Request
 
 from app.models.requests import (
@@ -23,11 +24,12 @@ from app.core.config import (
     SUPABASE_PRACTICE_ID,
     LOCATION_MAP,
     TEBRA_VALID_NAMES,
+    TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS,
 )
 from app.core.logger import logger
 from app.services.tebra_service import (
     call_tebra_get_appointments,
-    call_tebra_get_appointments_by_patient,
+    call_tebra_get_appointments_by_patient_id,
     get_patient_by_name,
     create_patient,
     create_appointment_in_tebra,
@@ -38,8 +40,6 @@ from app.services.supabase_service import (
     supabase_insert_appointment,
     supabase_update_appointment,
     supabase_update_lead,
-    supabase_fetch_appointments_by_patient_date_time,
-    inbound_lookup_first_name_key,
 )
 from app.services.appointment_sms_service import send_appointment_sms_if_needed
 from app.utils.time_utils import (
@@ -67,61 +67,131 @@ def _normalize_phone_digits(raw: str | None) -> str | None:
         return None
     return digits
 
-def _normalize_person_name_key(raw: str | None) -> str:
-    if not raw:
-        return ""
-    return " ".join(str(raw).strip().lower().split())
-
-
-def _inbound_row_from_supabase(row: dict) -> dict | None:
-    tid = row.get("tebra_appointment_id")
-    if not tid:
+def _split_patient_first_last(raw: str | None) -> tuple[str, str] | None:
+    parts = (str(raw or "").strip()).split()
+    if len(parts) < 2:
         return None
-    appt_date = row.get("appointment_date")
-    time_raw = row.get("appointment_time")
-    time_12 = None
-    time_24 = None
-    if time_raw is not None:
-        ts = str(time_raw).strip()
-        if ts:
-            seg = ts.split(":")
-            if len(seg) >= 2:
-                try:
-                    h, mn = int(seg[0]), int(seg[1])
-                    time_12 = format_12hr(h, mn)
-                    time_24 = f"{h:02d}:{mn:02d}"
-                except ValueError:
-                    time_24 = ts[:5] if len(ts) >= 5 else ts
-    return {
-        "tebra_appointment_id": str(tid),
-        "patient_full_name": row.get("patient_name"),
-        "appointment_date": appt_date,
-        "appointment_time_12hr": time_12,
-        "appointment_time_24hr": time_24,
-        "service_location_name": row.get("location"),
-        "appointment_reason": row.get("service"),
-        "confirmation_status": row.get("status"),
-        "supabase_appointment_id": row.get("id"),
-        "source": "supabase",
-    }
+    return parts[0], " ".join(parts[1:])
 
 
-def _format_inbound_lookup_summary(appointments: list, lookup_source: str) -> str:
-    if not appointments:
+def _inbound_lookup_date_range_la() -> tuple[str, str]:
+    la = ZoneInfo("America/Los_Angeles")
+    today = datetime.now(la).date()
+    end = today + timedelta(days=TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS)
+    return today.isoformat(), end.isoformat()
+
+
+def _keep_inbound_confirmation_status(status: str | None) -> bool:
+    if not status or not str(status).strip():
+        return True
+    u = str(status).strip().lower()
+    if "cancel" in u:
+        return False
+    if u == "rescheduled":
+        return False
+    if "no show" in u or "noshow" in u.replace(" ", ""):
+        return False
+    return True
+
+
+def _is_upcoming_in_la(a: dict, now_la: datetime) -> bool:
+    d = a.get("appointment_date")
+    if not d or not isinstance(d, str):
+        return False
+    today_s = now_la.date().isoformat()
+    if d > today_s:
+        return True
+    if d < today_s:
+        return False
+    t24 = a.get("appointment_time_24hr") or ""
+    if not (isinstance(t24, str) and len(t24) >= 5 and t24[2] == ":"):
+        return True
+    try:
+        hh, mm = int(t24[:2]), int(t24[3:5])
+    except ValueError:
+        return True
+    return (hh, mm) >= (now_la.hour, now_la.minute)
+
+
+def _sort_inbound_appointments(appts: list[dict]) -> list[dict]:
+    def key(a: dict) -> tuple:
+        d = a.get("appointment_date") or ""
+        t = a.get("appointment_time_24hr") or "99:99"
+        return (d, t)
+
+    return sorted(appts, key=key)
+
+
+async def _supabase_appointment_id_for_tebra(tebra_id: str, rid: str) -> str | None:
+    if not tebra_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/appointments?tebra_appointment_id=eq.{tebra_id}"
+                "&select=id&limit=1",
+                headers=SUPABASE_HEADERS,
+            )
+            if r.status_code == 200 and (r.json() or []):
+                return (r.json() or [None])[0].get("id")
+    except Exception as e:
+        logger.warning("[%s] tebra→supabase id lookup error: %s", rid, e)
+    return None
+
+
+async def _attach_supabase_ids(appts: list[dict], rid: str) -> None:
+    for a in appts:
+        tid = a.get("tebra_appointment_id")
+        if not tid:
+            continue
+        sb = await _supabase_appointment_id_for_tebra(str(tid), rid)
+        if sb:
+            a["supabase_appointment_id"] = sb
+
+
+def _format_inbound_locked_row(a: dict) -> str:
+    loc = a.get("service_location_name") or "unknown location"
+    d = a.get("appointment_date") or "?"
+    t = a.get("appointment_time_12hr") or a.get("appointment_time_24hr") or "?"
+    tid = a.get("tebra_appointment_id")
+    sb = a.get("supabase_appointment_id")
+    reason = a.get("appointment_reason")
+    reason_bit = f" — {reason}" if reason else ""
+    sb_bit = f" appointment_id:{sb}" if sb else ""
+    return (
+        f"Locked for reschedule (Pacific): {d} at {t} — {loc}{reason_bit}. "
+        f"Use tebra_appointment_id {tid}{sb_bit} with reschedule_appointment. "
+        "Do not read the numeric IDs aloud unless you are double-checking with the caller."
+    )
+
+
+def _format_inbound_appointment_list(appts: list[dict], window_days: int) -> str:
+    if not appts:
         return (
-            "No appointments in our clinic records for that exact name, date, and time."
+            f"No upcoming appointments in Tebra for that patient in the next {window_days} days "
+            "(Pacific calendar), for the configured practice."
         )
-    src_label = "clinic records" if lookup_source == "supabase" else "Tebra"
-    parts = []
-    for a in appointments:
+    lines = [
+        f"Found {len(appts)} upcoming appointment(s) (Pacific time, next {window_days} days). "
+        "Read date, time, and location to the caller. Each line below has tebra_appointment_id and "
+        "appointment_id (Supabase) when known — after they pick an option, match their answer to one line "
+        "and pass those IDs to reschedule_appointment (no second inbound_lookup needed unless ambiguous). "
+        "Do not read those IDs aloud.",
+        "",
+    ]
+    for i, a in enumerate(appts, start=1):
         loc = a.get("service_location_name") or "unknown location"
+        d = a.get("appointment_date") or "?"
+        t = a.get("appointment_time_12hr") or a.get("appointment_time_24hr") or "?"
+        tid = a.get("tebra_appointment_id")
+        reason = a.get("appointment_reason") or ""
+        rbit = f" — {reason}" if reason else ""
         sb = a.get("supabase_appointment_id")
         sb_bit = f" appointment_id:{sb}" if sb else ""
-        parts.append(
-            f"tebra_id {a['tebra_appointment_id']}: {a.get('appointment_date') or '?'} "
-            f"at {a.get('appointment_time_12hr') or a.get('appointment_time_24hr') or '?'} — {loc}{sb_bit}"
+        lines.append(
+            f"({i}) {d} at {t} — {loc}{rbit} — tebra_appointment_id {tid}{sb_bit}"
         )
-    return f"Found {len(appointments)} appointment(s) via {src_label}. " + " | ".join(parts)
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -588,11 +658,13 @@ async def reschedule_appointment(request: Request):
         new_location   = args.get("location")
         new_service    = args.get("service")
         lead_id        = args.get("lead_id")
+        appointment_id = str(appointment_id).strip() if appointment_id else None
 
         # ── Validate required fields ──
+        # appointment_id is optional: set when inbound_lookup attached a Supabase row (Case A);
+        # staff-only Tebra visits (Case B) reschedule with tebra_appointment_id only.
         missing = [f for f, v in {
             "tebra_appointment_id": tebra_appt_id,
-            "appointment_id":       appointment_id,
             "new_date":             new_date,
             "new_time":             new_time,
         }.items() if not v]
@@ -629,35 +701,34 @@ async def reschedule_appointment(request: Request):
 
         time_normalized = f"{parsed_time[0]:02d}:{parsed_time[1]:02d}"
 
-        # ── Idempotency guard (Supabase-first) ──
-        # If VAPI retries this tool call (e.g. connection reset) after a successful reschedule,
-        # we must not create a second "new" appointment.
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/appointments"
-                    f"?rescheduled_from_id=eq.{appointment_id}"
-                    f"&appointment_date=eq.{new_date}"
-                    f"&appointment_time=eq.{time_normalized}"
-                    f"&select=id,tebra_appointment_id",
-                    headers=SUPABASE_HEADERS,
-                )
-                if r.status_code == 200 and r.json():
-                    existing = r.json()[0]
-                    existing_sb_id = existing.get("id")
-                    existing_tebra = existing.get("tebra_appointment_id")
-                    logger.info(
-                        "[%s] reschedule IDEMPOTENT hit old_appt_id=%s new_appt_id=%s new_tebra_id=%s",
-                        rid, appointment_id, existing_sb_id, existing_tebra
+        # ── Idempotency guard (Supabase-first, only when we have old appointment_id) ──
+        if appointment_id:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/appointments"
+                        f"?rescheduled_from_id=eq.{appointment_id}"
+                        f"&appointment_date=eq.{new_date}"
+                        f"&appointment_time=eq.{time_normalized}"
+                        f"&select=id,tebra_appointment_id",
+                        headers=SUPABASE_HEADERS,
                     )
-                    msg = (
-                        f"Appointment already rescheduled! "
-                        f"New appointment on {new_date} at {format_12hr(parsed_time[0], parsed_time[1])}. "
-                        f"appointment_id:{existing_sb_id} tebra_id:{existing_tebra}"
-                    )
-                    return build_vapi_response(tool_call_id, msg)
-        except Exception as e:
-            logger.error("[%s] reschedule idempotency check error: %s", rid, e)
+                    if r.status_code == 200 and r.json():
+                        existing = r.json()[0]
+                        existing_sb_id = existing.get("id")
+                        existing_tebra = existing.get("tebra_appointment_id")
+                        logger.info(
+                            "[%s] reschedule IDEMPOTENT hit old_appt_id=%s new_appt_id=%s new_tebra_id=%s",
+                            rid, appointment_id, existing_sb_id, existing_tebra
+                        )
+                        msg = (
+                            f"Appointment already rescheduled! "
+                            f"New appointment on {new_date} at {format_12hr(parsed_time[0], parsed_time[1])}. "
+                            f"appointment_id:{existing_sb_id} tebra_id:{existing_tebra}"
+                        )
+                        return build_vapi_response(tool_call_id, msg)
+            except Exception as e:
+                logger.error("[%s] reschedule idempotency check error: %s", rid, e)
 
         # ── Step 1: Get current appointment from Tebra ──
         logger.info("[%s] STEP 1 → GetAppointment tebra_id=%s", rid, tebra_appt_id)
@@ -739,25 +810,29 @@ async def reschedule_appointment(request: Request):
 
         new_tebra_id    = create_result["appointment_id"]
 
-        # ── Step 4: Update Supabase — mark old appointment as rescheduled ──
-        await supabase_update_appointment(appointment_id, {
-            "status":     "rescheduled",
-            "updated_at": datetime.utcnow().isoformat(),
-        })
+        # ── Step 4: Update Supabase — mark old appointment as rescheduled (Case A only) ──
+        if appointment_id:
+            await supabase_update_appointment(appointment_id, {
+                "status":     "rescheduled",
+                "updated_at": datetime.utcnow().isoformat(),
+            })
 
         # ── Step 5: Insert new appointment into Supabase ──
         old_sb_appt = None
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/appointments?id=eq.{appointment_id}"
-                    f"&select=patient_name,patient_phone,service,location,lead_id",
-                    headers=SUPABASE_HEADERS,
-                )
-                if r.status_code == 200 and r.json():
-                    old_sb_appt = r.json()[0]
-        except Exception as e:
-            logger.error("[%s] Failed to fetch old Supabase appointment: %s", rid, e)
+        if appointment_id:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/appointments?id=eq.{appointment_id}"
+                        f"&select=patient_name,patient_phone,service,location,lead_id",
+                        headers=SUPABASE_HEADERS,
+                    )
+                    if r.status_code == 200 and r.json():
+                        old_sb_appt = r.json()[0]
+            except Exception as e:
+                logger.error("[%s] Failed to fetch old Supabase appointment: %s", rid, e)
+
+        tebra_appt_name = (old_appt.get("AppointmentName") or "").strip() or None
 
         new_appt_data = {
             "tebra_appointment_id":      new_tebra_id,
@@ -768,12 +843,19 @@ async def reschedule_appointment(request: Request):
             "appointment_time":          time_normalized,
             "status":                    "scheduled",
             "practice_id":               SUPABASE_PRACTICE_ID,
-            "rescheduled_from_id":       appointment_id,
             "service":                   new_service or (old_sb_appt.get("service") if old_sb_appt else None),
             "location":                  new_location or (old_sb_appt.get("location") if old_sb_appt else None),
-            "patient_name":              old_sb_appt.get("patient_name") if old_sb_appt else None,
+            "patient_name":              (old_sb_appt.get("patient_name") if old_sb_appt else None) or tebra_appt_name,
             "patient_phone":             old_sb_appt.get("patient_phone") if old_sb_appt else None,
         }
+        if appointment_id:
+            new_appt_data["rescheduled_from_id"] = appointment_id
+        if not new_appt_data.get("location") and location_id:
+            for slug, meta in LOCATION_MAP.items():
+                if str(meta.get("id")) == str(location_id):
+                    new_appt_data["location"] = slug
+                    break
+
         # Guard against unresolved VAPI template variables like '{{lead_id}}'
         if lead_id and not lead_id.startswith("{{"):
             new_appt_data["lead_id"] = lead_id
@@ -1094,12 +1176,12 @@ async def cancel_appointment(request: Request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT: INBOUND LOOKUP APPOINTMENTS (Supabase by name+date+time)
+# ENDPOINT: INBOUND LOOKUP APPOINTMENTS (Tebra GetPatients → GetAppointments by PatientID)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post(
     "/inbound-lookup-appointments",
-    summary="Resolve appointment IDs by exact patient name + appointment date + time (Supabase only)",
+    summary="List upcoming appointments (Tebra first, Supabase IDs merged) or lock one row via selected_tebra_appointment_id",
     openapi_extra={
         "requestBody": {
             "content": {"application/json": {"schema": inline_schema_refs(InboundLookupAppointmentsRequest.model_json_schema())}},
@@ -1109,8 +1191,9 @@ async def cancel_appointment(request: Request):
 )
 async def inbound_lookup_appointments(request: Request):
     """
-    Inbound helper: resolve Tebra + Supabase appointment IDs using FIRST name only (first token),
-    plus appointment date and time. Phone / caller-ID matching is not used.
+    Inbound: Tebra first — GetPatients (first + last) → GetAppointments by PatientID for the Pacific
+    date window. Supabase second — each Tebra row is looked up by tebra_appointment_id to attach
+    appointment_id when the booking exists in our DB (form/outbound path).
     """
     try:
         rid = str(uuid4())[:8]
@@ -1127,57 +1210,20 @@ async def inbound_lookup_appointments(request: Request):
             args = body
 
         name = args.get("patient_full_name") or args.get("name") or args.get("patient_name")
-        date = args.get("date") or args.get("appointment_date")
-        time_str = args.get("time") or args.get("appointment_time")
+        selected_raw = args.get("selected_tebra_appointment_id")
 
-        missing = [k for k, v in {
-            "patient_full_name": name,
-            "date": date,
-            "time": time_str,
-        }.items() if not v]
-        if missing:
-            return build_vapi_response(tool_call_id, f"Missing required fields: {', '.join(missing)}.")
+        if not name or not str(name).strip():
+            return build_vapi_response(tool_call_id, "Missing required field: patient_full_name.")
 
         name_clean = str(name).strip()
-        if not _normalize_person_name_key(name_clean):
-            return build_vapi_response(tool_call_id, "patient_full_name cannot be empty.")
-
-        date_s = str(date).strip()
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_s):
+        split = _split_patient_first_last(name_clean)
+        if not split:
             return build_vapi_response(
                 tool_call_id,
-                f"I need the appointment date in YYYY-MM-DD format. You said '{date}'.",
+                "I need both first and last name (e.g. Jane Doe). Ask the caller to spell both.",
             )
+        first_name, last_name = split
 
-        parsed_time = parse_time_to_24hr(str(time_str).strip())
-        if not parsed_time:
-            return build_vapi_response(
-                tool_call_id,
-                f"I need the appointment time in HH:MM or like '7 PM'. You said '{time_str}'.",
-            )
-        hour, minute = parsed_time
-
-        sb_rows = await supabase_fetch_appointments_by_patient_date_time(
-            name_clean, date_s, hour, minute,
-        )
-
-        appts: list[dict] = []
-        for row in sb_rows:
-            norm = _inbound_row_from_supabase(row)
-            if norm:
-                appts.append(norm)
-
-        if appts:
-            if len(appts) > 1:
-                return build_vapi_response(
-                    tool_call_id,
-                    "I found multiple appointments for that first name at that exact date and time. "
-                    "Please ask the caller to confirm their last name or location.",
-                )
-            summary = _format_inbound_lookup_summary(appts, "supabase")
-            return build_vapi_response(tool_call_id, summary)
-
-        # ── Tebra fallback (first name only in API filter + exact slot) ───────
         tz_override = args.get("timezone_offset_from_gmt")
         tz_int = None
         if tz_override is not None and str(tz_override).strip() != "":
@@ -1189,17 +1235,21 @@ async def inbound_lookup_appointments(request: Request):
                     f"timezone_offset_from_gmt must be an integer. You said '{tz_override}'.",
                 )
 
-        tebra_first = inbound_lookup_first_name_key(name_clean)
-        if not tebra_first:
+        start_d, end_d = _inbound_lookup_date_range_la()
+        now_la = datetime.now(ZoneInfo("America/Los_Angeles"))
+
+        patient_id = await get_patient_by_name(first_name, last_name, rid=rid)
+        if not patient_id:
             return build_vapi_response(
                 tool_call_id,
-                "I need a patient first name to look up the appointment.",
+                "No patient found in Tebra with that exact first and last name. "
+                "Ask the caller to spell both names again.",
             )
 
-        tebra_result = await call_tebra_get_appointments_by_patient(
-            patient_full_name=tebra_first,
-            start_date=date_s,
-            end_date=date_s,
+        tebra_result = await call_tebra_get_appointments_by_patient_id(
+            patient_id=patient_id,
+            start_date=start_d,
+            end_date=end_d,
             timezone_offset_from_gmt=tz_int,
             rid=rid,
         )
@@ -1207,62 +1257,37 @@ async def inbound_lookup_appointments(request: Request):
             err = tebra_result.get("error_message") or "Tebra lookup failed."
             return build_vapi_response(tool_call_id, f"Could not look up appointments in Tebra: {err}")
 
-        target_first = inbound_lookup_first_name_key(name_clean)
-        matches: list[dict] = []
-        for a in tebra_result.get("appointments") or []:
-            if (a.get("appointment_date") != date_s):
+        raw_appts = list(tebra_result.get("appointments") or [])
+        filtered: list[dict] = []
+        for a in raw_appts:
+            if not _keep_inbound_confirmation_status(a.get("confirmation_status")):
                 continue
-            h24 = a.get("appointment_time_24hr") or ""
-            if not (isinstance(h24, str) and len(h24) >= 5):
+            if not _is_upcoming_in_la(a, now_la):
                 continue
-            try:
-                hh, mm = int(h24.split(":")[0]), int(h24.split(":")[1])
-            except Exception:
-                continue
-            if hh != hour or mm != minute:
-                continue
-            cand_first = inbound_lookup_first_name_key(a.get("patient_full_name") or "")
-            if cand_first and target_first and cand_first == target_first:
-                matches.append(a)
+            filtered.append(a)
 
-        if not matches:
-            return build_vapi_response(
-                tool_call_id,
-                "No appointments found for that first name, date, and time in clinic records or Tebra.",
-            )
+        appts = _sort_inbound_appointments(filtered)
+        await _attach_supabase_ids(appts, rid)
 
-        if len(matches) > 1:
-            return build_vapi_response(
-                tool_call_id,
-                "I found multiple Tebra appointments for that first name at that exact date and time. "
-                "Please ask the caller to confirm their last name or location.",
-            )
+        selected = str(selected_raw).strip() if selected_raw is not None and str(selected_raw).strip() else None
+        if selected:
+            chosen = None
+            for a in appts:
+                if str(a.get("tebra_appointment_id") or "") == selected:
+                    chosen = a
+                    break
+            if not chosen:
+                return build_vapi_response(
+                    tool_call_id,
+                    "That tebra_appointment_id is not in this patient's upcoming list. "
+                    "Re-run listing without selected_tebra_appointment_id or pick a valid option.",
+                )
+            return build_vapi_response(tool_call_id, _format_inbound_locked_row(chosen))
 
-        best = matches[0]
-        tebra_id = best.get("tebra_appointment_id")
+        if len(appts) == 1:
+            return build_vapi_response(tool_call_id, _format_inbound_locked_row(appts[0]))
 
-        # Try to also map to a Supabase appointment_id if that Tebra ID exists in appointments.
-        supabase_id = None
-        if tebra_id:
-            try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
-                    r = await client.get(
-                        f"{SUPABASE_URL}/rest/v1/appointments?tebra_appointment_id=eq.{tebra_id}"
-                        f"&select=id&limit=1",
-                        headers=SUPABASE_HEADERS,
-                    )
-                    if r.status_code == 200 and (r.json() or []):
-                        supabase_id = (r.json() or [None])[0].get("id")
-            except Exception as _e:
-                logger.warning("[%s] tebra->supabase mapping lookup error: %s", rid, _e)
-
-        loc = best.get("service_location_name") or "unknown location"
-        time_12 = best.get("appointment_time_12hr") or best.get("appointment_time_24hr") or "unknown time"
-        msg = (
-            f"Found 1 appointment via Tebra. "
-            f"tebra_id {tebra_id}: {date_s} at {time_12} — {loc}"
-            f"{f' appointment_id:{supabase_id}' if supabase_id else ''}"
-        )
+        msg = _format_inbound_appointment_list(appts, TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS)
         return build_vapi_response(tool_call_id, msg)
     except Exception as e:
         logger.exception("Error in /inbound-lookup-appointments: %s", e)
