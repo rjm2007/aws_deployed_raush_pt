@@ -2,7 +2,7 @@ import re
 import asyncio
 import httpx
 from datetime import datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Request
 
@@ -54,6 +54,26 @@ from app.utils.time_utils import (
 from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments
 
 router = APIRouter(tags=["Appointments"])
+
+def _sanitize_supabase_lead_id(raw) -> str | None:
+    """
+    Supabase `lead_id` must be a UUID. Vapi/OpenAPI often sends placeholders like the literal
+    string \"string\" or \"{{lead_id}}\" — drop those so inserts/patches do not 400.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s.startswith("{{"):
+        return None
+    low = s.lower()
+    if low in ("string", "null", "none", "undefined", "nan", "n/a", "na", "lead_id"):
+        return None
+    try:
+        UUID(s)
+        return s
+    except ValueError:
+        return None
+
 
 def _normalize_phone_digits(raw: str | None) -> str | None:
     if not raw:
@@ -194,6 +214,24 @@ def _format_inbound_appointment_list(appts: list[dict], window_days: int) -> str
     return "\n".join(lines)
 
 
+def _inbound_lookup_vapi_response(rid: str, tool_call_id: str | None, message: str):
+    """Log Vapi tool reply; warn if toolCallId missing (Vapi shows 'No result returned')."""
+    preview = message if len(message) <= 700 else message[:700] + "…"
+    logger.info(
+        "[%s] inbound-lookup-appointments RESPONSE tool_call_id=%s result_chars=%s preview=%r",
+        rid,
+        tool_call_id,
+        len(message),
+        preview,
+    )
+    if not tool_call_id:
+        logger.warning(
+            "[%s] inbound-lookup-appointments missing tool_call_id — Vapi will likely show 'No result returned'.",
+            rid,
+        )
+    return build_vapi_response(tool_call_id, message)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENDPOINT: CREATE APPOINTMENT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -235,6 +273,8 @@ async def create_appointment(request: Request):
             service  = body.get("service")
             location = body.get("location")
             lead_id  = body.get("lead_id")
+
+        lead_id = _sanitize_supabase_lead_id(lead_id)
 
         # ── Validate required fields ──
         missing = [f for f, v in {
@@ -493,7 +533,7 @@ async def create_appointment(request: Request):
                         "location": location,
                         "service": service,
                     },
-                    lead_id=lead_id if lead_id and not str(lead_id).startswith("{{") else None,
+                    lead_id=lead_id,
                 )
             msg = (
                 f"Appointment booked successfully! "
@@ -657,7 +697,7 @@ async def reschedule_appointment(request: Request):
         new_time       = args.get("new_time")
         new_location   = args.get("location")
         new_service    = args.get("service")
-        lead_id        = args.get("lead_id")
+        lead_id        = _sanitize_supabase_lead_id(args.get("lead_id"))
         appointment_id = str(appointment_id).strip() if appointment_id else None
 
         # ── Validate required fields ──
@@ -856,11 +896,12 @@ async def reschedule_appointment(request: Request):
                     new_appt_data["location"] = slug
                     break
 
-        # Guard against unresolved VAPI template variables like '{{lead_id}}'
-        if lead_id and not lead_id.startswith("{{"):
+        if lead_id:
             new_appt_data["lead_id"] = lead_id
         elif old_sb_appt and old_sb_appt.get("lead_id"):
-            new_appt_data["lead_id"] = old_sb_appt["lead_id"]
+            sb_lid = _sanitize_supabase_lead_id(old_sb_appt.get("lead_id"))
+            if sb_lid:
+                new_appt_data["lead_id"] = sb_lid
 
         # Remove None values
         new_appt_data = {k: v for k, v in new_appt_data.items() if v is not None}
@@ -950,7 +991,7 @@ async def confirm_appointment(request: Request):
         tebra_appt_id  = args.get("tebra_appointment_id")
         appointment_id = args.get("appointment_id")
         outcome        = (args.get("outcome") or "").lower()
-        lead_id        = args.get("lead_id")
+        lead_id        = _sanitize_supabase_lead_id(args.get("lead_id"))
         notes          = args.get("notes")
         reminder_type  = args.get("reminder_type", "24hr")
 
@@ -1033,7 +1074,7 @@ async def confirm_appointment(request: Request):
                     "location": None,
                     "service": None,
                 },
-                lead_id=lead_id if lead_id and not str(lead_id).startswith("{{") else None,
+                lead_id=lead_id,
             )
 
         return build_vapi_response(tool_call_id, msg)
@@ -1086,7 +1127,7 @@ async def cancel_appointment(request: Request):
 
         tebra_appt_id  = args.get("tebra_appointment_id")
         appointment_id = args.get("appointment_id")
-        lead_id        = args.get("lead_id")
+        lead_id        = _sanitize_supabase_lead_id(args.get("lead_id"))
         notes          = args.get("notes")
 
         if not tebra_appt_id:
@@ -1162,7 +1203,7 @@ async def cancel_appointment(request: Request):
                 appointment_id=appointment_id,
                 notification_type="sms_appointment_cancelled",
                 appt={},
-                lead_id=lead_id if lead_id and not str(lead_id).startswith("{{") else None,
+                lead_id=lead_id,
             )
 
         return build_vapi_response(tool_call_id, msg)
@@ -1209,16 +1250,24 @@ async def inbound_lookup_appointments(request: Request):
         else:
             args = body if isinstance(body, dict) else {}
 
+        logger.info(
+            "[%s] inbound-lookup-appointments parsed tool_call_id=%s arg_keys=%s",
+            rid,
+            tool_call_id,
+            list(args.keys()) if isinstance(args, dict) else None,
+        )
+
         name = args.get("patient_full_name") or args.get("name") or args.get("patient_name")
         selected_raw = args.get("selected_tebra_appointment_id")
 
         if not name or not str(name).strip():
-            return build_vapi_response(tool_call_id, "Missing required field: patient_full_name.")
+            return _inbound_lookup_vapi_response(rid, tool_call_id, "Missing required field: patient_full_name.")
 
         name_clean = str(name).strip()
         split = _split_patient_first_last(name_clean)
         if not split:
-            return build_vapi_response(
+            return _inbound_lookup_vapi_response(
+                rid,
                 tool_call_id,
                 "I need both first and last name (e.g. Jane Doe). Ask the caller to spell both.",
             )
@@ -1230,21 +1279,25 @@ async def inbound_lookup_appointments(request: Request):
             try:
                 tz_int = int(tz_override)
             except (TypeError, ValueError):
-                return build_vapi_response(
+                return _inbound_lookup_vapi_response(
+                    rid,
                     tool_call_id,
                     f"timezone_offset_from_gmt must be an integer. You said '{tz_override}'.",
                 )
 
         start_d, end_d = _inbound_lookup_date_range_la()
         now_la = datetime.now(ZoneInfo("America/Los_Angeles"))
+        logger.info("[%s] inbound-lookup window_la=%s..%s name=%r", rid, start_d, end_d, name_clean)
 
         patient_id = await get_patient_by_name(first_name, last_name, rid=rid)
         if not patient_id:
-            return build_vapi_response(
+            return _inbound_lookup_vapi_response(
+                rid,
                 tool_call_id,
                 "No patient found in Tebra with that exact first and last name. "
                 "Ask the caller to spell both names again.",
             )
+        logger.info("[%s] inbound-lookup GetPatients ok patient_id=%s", rid, patient_id)
 
         tebra_result = await call_tebra_get_appointments_by_patient_id(
             patient_id=patient_id,
@@ -1255,7 +1308,7 @@ async def inbound_lookup_appointments(request: Request):
         )
         if not tebra_result.get("ok"):
             err = tebra_result.get("error_message") or "Tebra lookup failed."
-            return build_vapi_response(tool_call_id, f"Could not look up appointments in Tebra: {err}")
+            return _inbound_lookup_vapi_response(rid, tool_call_id, f"Could not look up appointments in Tebra: {err}")
 
         raw_appts = list(tebra_result.get("appointments") or [])
         filtered: list[dict] = []
@@ -1266,8 +1319,21 @@ async def inbound_lookup_appointments(request: Request):
                 continue
             filtered.append(a)
 
+        logger.info(
+            "[%s] inbound-lookup tebra_rows raw=%s after_status_time_filter=%s",
+            rid,
+            len(raw_appts),
+            len(filtered),
+        )
+
         appts = _sort_inbound_appointments(filtered)
         await _attach_supabase_ids(appts, rid)
+        logger.info(
+            "[%s] inbound-lookup final_appts=%s ids=%s",
+            rid,
+            len(appts),
+            [a.get("tebra_appointment_id") for a in appts],
+        )
 
         selected = str(selected_raw).strip() if selected_raw is not None and str(selected_raw).strip() else None
         if selected:
@@ -1277,21 +1343,23 @@ async def inbound_lookup_appointments(request: Request):
                     chosen = a
                     break
             if not chosen:
-                return build_vapi_response(
+                return _inbound_lookup_vapi_response(
+                    rid,
                     tool_call_id,
                     "That tebra_appointment_id is not in this patient's upcoming list. "
                     "Re-run listing without selected_tebra_appointment_id or pick a valid option.",
                 )
-            return build_vapi_response(tool_call_id, _format_inbound_locked_row(chosen))
+            return _inbound_lookup_vapi_response(rid, tool_call_id, _format_inbound_locked_row(chosen))
 
         if len(appts) == 1:
-            return build_vapi_response(tool_call_id, _format_inbound_locked_row(appts[0]))
+            return _inbound_lookup_vapi_response(rid, tool_call_id, _format_inbound_locked_row(appts[0]))
 
         msg = _format_inbound_appointment_list(appts, TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS)
-        return build_vapi_response(tool_call_id, msg)
+        return _inbound_lookup_vapi_response(rid, tool_call_id, msg)
     except Exception as e:
         logger.exception("Error in /inbound-lookup-appointments: %s", e)
-        return build_vapi_response(
+        return _inbound_lookup_vapi_response(
+            rid,
             locals().get("tool_call_id"),
             "Sorry, there was an error looking up appointments. Please try again.",
         )

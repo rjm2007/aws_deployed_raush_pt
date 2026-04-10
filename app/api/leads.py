@@ -21,7 +21,7 @@ from app.services.supabase_service import (
     supabase_fetch_inbound_call_by_call_id,
     _insert_call_log,
 )
-from app.utils.parser import build_vapi_response
+from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments, vapi_response_content
 from app.services.twilio_service import twilio_send_sms
 
 router = APIRouter(tags=["Leads"])
@@ -75,16 +75,18 @@ def _normalize_phone(raw: str | None) -> str | None:
 def _extract_tool_args(body: dict) -> tuple[str | None, dict]:
     """Return (tool_call_id, args_dict) for either VAPI wrapper or direct JSON payload."""
     tool_call_id = None
-    args: dict = body if isinstance(body, dict) else {}
+    if not isinstance(body, dict):
+        return None, {}
+    args: dict = dict(body)
 
-    if isinstance(body, dict) and "message" in body and isinstance(body.get("message"), dict):
+    if "message" in body and isinstance(body.get("message"), dict):
         msg = body["message"]
         tool_calls = msg.get("toolCalls")
         if isinstance(tool_calls, list) and tool_calls and isinstance(tool_calls[0], dict):
             tc = tool_calls[0]
             tool_call_id = tc.get("id")
             fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-            args = fn.get("arguments") if isinstance(fn.get("arguments"), dict) else args
+            args = coerce_vapi_tool_arguments(fn.get("arguments"))
 
     return tool_call_id, args if isinstance(args, dict) else {}
 
@@ -130,6 +132,21 @@ def _extract_inbound_caller_number_from_vapi(body: dict) -> str | None:
     )
 
 
+def _preview_text(s: str | None, max_len: int = 240) -> str | None:
+    if s is None:
+        return None
+    t = str(s).strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+def _log_inbound_status_return(rid: str, tool_call_id: str | None, message: str) -> JSONResponse:
+    content = vapi_response_content(tool_call_id, message)
+    logger.info("[%s] update-inbound-status RESPONSE_JSON=%s", rid, content)
+    return JSONResponse(content=content)
+
+
 async def _upsert_inbound_calls_row(rid: str, payload: dict) -> tuple[dict | None, str | None]:
     """
     Single write path for inbound_calls. Does NOT touch outbound lead logic.
@@ -167,24 +184,26 @@ async def update_inbound_status(request: Request):
         logger.info("[%s] update-inbound-status body=%s", rid, body)
 
         tool_call_id, args = _extract_tool_args(body)
-        # Swagger / direct JSON support: allow passing the model shape.
-        # Tool wrapper also supported unchanged.
-        if isinstance(args, dict) and ("crm_status" in args):
-            # no-op: args already has what we need
-            pass
+        logger.info(
+            "[%s] update-inbound-status parsed tool_call_id=%s arg_keys=%s",
+            rid,
+            tool_call_id,
+            list(args.keys()) if isinstance(args, dict) else None,
+        )
 
         crm_status = (args.get("crm_status") or "").strip()
         if crm_status not in _INBOUND_ALLOWED_CRM_STATUSES:
-            return build_vapi_response(
-                tool_call_id,
-                "crm_status must be one of: in_progress, follow_up, manual_follow_up, complete.",
-            )
+            err_msg = "crm_status must be one of: in_progress, follow_up, manual_follow_up, complete."
+            logger.info("[%s] update-inbound-status RESPONSE (validation) tool_call_id=%s message=%r", rid, tool_call_id, err_msg)
+            return _log_inbound_status_return(rid, tool_call_id, err_msg)
 
         call_id = (args.get("call_id") or "").strip() or (
             _extract_inbound_call_id_from_vapi(body, request) or ""
         )
         if not call_id:
-            return build_vapi_response(tool_call_id, "Missing call_id.")
+            err_msg = "Missing call_id."
+            logger.info("[%s] update-inbound-status RESPONSE (validation) tool_call_id=%s message=%r", rid, tool_call_id, err_msg)
+            return _log_inbound_status_return(rid, tool_call_id, err_msg)
 
         caller_number = _normalize_phone(args.get("caller_number") or args.get("caller_phone") or _extract_inbound_caller_number_from_vapi(body))
         caller_name = args.get("caller_name") or args.get("patient_name") or args.get("name")
@@ -192,6 +211,19 @@ async def update_inbound_status(request: Request):
         location = args.get("location")
         route = args.get("route")
         notes = args.get("notes") or args.get("summary")
+
+        logger.info(
+            "[%s] update-inbound-status request_summary call_id=%s crm_status=%s route=%r appointment_id=%r "
+            "caller_number_tail=%s caller_name=%r notes_preview=%r",
+            rid,
+            call_id,
+            crm_status,
+            route,
+            appointment_id,
+            (caller_number[-4:] if caller_number and len(caller_number) >= 4 else caller_number),
+            caller_name,
+            _preview_text(notes),
+        )
 
         now_iso = datetime.utcnow().isoformat()
         payload = {
@@ -207,15 +239,21 @@ async def update_inbound_status(request: Request):
         }
         payload = {k: v for k, v in payload.items() if v is not None and v != ""}
 
-        await _upsert_inbound_calls_row(rid, payload)
+        logger.info("[%s] update-inbound-status supabase_payload=%s", rid, payload)
+        row, upsert_err = await _upsert_inbound_calls_row(rid, payload)
+        logger.info("[%s] update-inbound-status upsert result row=%s err=%s", rid, row is not None, upsert_err)
 
-        return build_vapi_response(tool_call_id, f"Inbound call {call_id} saved with crm_status={crm_status}.")
+        ok_msg = f"Inbound call {call_id} saved with crm_status={crm_status}."
+        logger.info("[%s] update-inbound-status RESPONSE tool_call_id=%s message=%r", rid, tool_call_id, ok_msg)
+        if not tool_call_id:
+            logger.warning("[%s] update-inbound-status no tool_call_id — Vapi may report 'No result returned'.", rid)
+        return _log_inbound_status_return(rid, tool_call_id, ok_msg)
     except Exception as e:
         logger.exception("Error in /update-inbound-status: %s", e)
-        return build_vapi_response(
-            locals().get("tool_call_id"),
-            "Sorry, there was an error updating inbound status. Please try again.",
-        )
+        _tcid = locals().get("tool_call_id")
+        _em = "Sorry, there was an error updating inbound status. Please try again."
+        logger.info("[%s] update-inbound-status RESPONSE (exception) tool_call_id=%s message=%r", rid, _tcid, _em)
+        return _log_inbound_status_return(rid, _tcid, _em)
 
 
 @router.post("/inbound-call-event", summary="Inbound tool alias: update-inbound-status")
