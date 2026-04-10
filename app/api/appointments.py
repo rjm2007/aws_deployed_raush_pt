@@ -51,7 +51,7 @@ from app.utils.time_utils import (
     is_valid_clinic_slot,
     format_location_hours,
 )
-from app.utils.parser import build_vapi_response
+from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments
 
 router = APIRouter(tags=["Appointments"])
 
@@ -1205,9 +1205,9 @@ async def inbound_lookup_appointments(request: Request):
         if "message" in body and "toolCalls" in body["message"]:
             tc = body["message"]["toolCalls"][0]
             tool_call_id = tc.get("id")
-            args = tc["function"]["arguments"]
+            args = coerce_vapi_tool_arguments((tc.get("function") or {}).get("arguments"))
         else:
-            args = body
+            args = body if isinstance(body, dict) else {}
 
         name = args.get("patient_full_name") or args.get("name") or args.get("patient_name")
         selected_raw = args.get("selected_tebra_appointment_id")
