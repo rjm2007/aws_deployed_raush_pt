@@ -2,3 +2,4 @@ fastapi
 httpx
 python-dotenv
 uvicorn
+apscheduler
