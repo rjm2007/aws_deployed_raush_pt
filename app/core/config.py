@@ -84,8 +84,10 @@ APPOINTMENT_REASON_MAP = {
 # Change CLINIC_TZ_OFFSET to -8 in November.
 CLINIC_TZ_OFFSET = timedelta(hours=-7)   # Pacific Daylight Time
 
-# Kareo/Tebra GetAppointments patient filter: hours offset from GMT (Pacific PDT ≈ 7).
-TEBRA_TIMEZONE_OFFSET_FROM_GMT = int(os.getenv("TEBRA_TIMEZONE_OFFSET_FROM_GMT", "7"))
+# Kareo/Tebra GetAppointments (patient filter): signed hours offset from GMT for StartDate strings.
+# Pacific PDT = UTC-7 → use -7. Pacific PST = UTC-8 → use -8.
+# A positive value (e.g. 7) formats list times like UTC+7 and breaks America/Los_Angeles display.
+TEBRA_TIMEZONE_OFFSET_FROM_GMT = int(os.getenv("TEBRA_TIMEZONE_OFFSET_FROM_GMT", "-7"))
 
 # Inbound lookup: GetAppointments by PatientID is scoped to one Tebra practice name (SOAP Filter).
 TEBRA_INBOUND_APPOINTMENTS_PRACTICE_NAME = os.getenv(

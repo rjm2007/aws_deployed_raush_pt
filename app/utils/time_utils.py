@@ -1,7 +1,10 @@
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app.core.config import CLINIC_TZ_OFFSET
+
+_LA_CLINIC = ZoneInfo("America/Los_Angeles")
 
 
 def _minutes(h: int, mn: int) -> int:
@@ -104,6 +107,28 @@ def format_12hr(h: int, mn: int) -> str:
     if display_h == 0:
         display_h = 12
     return f"{display_h}:{str(mn).zfill(2)} {ampm}"
+
+
+def iso_utc_z_to_la_parts(iso_z: str | None) -> tuple[str, int, int] | None:
+    """
+    Parse Tebra GetAppointment StartTime / EndTime (ISO with Z) to clinic wall clock
+    in America/Los_Angeles. Returns (YYYY-MM-DD, hour24, minute) or None.
+    """
+    if not iso_z:
+        return None
+    s = str(iso_z).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        utc = datetime.fromisoformat(s)
+        if utc.tzinfo is None:
+            utc = utc.replace(tzinfo=timezone.utc)
+        la = utc.astimezone(_LA_CLINIC)
+        return la.strftime("%Y-%m-%d"), la.hour, la.minute
+    except Exception:
+        return None
 
 
 def parse_tebra_local_start_datetime(raw: str | None) -> tuple[str, int, int] | None:

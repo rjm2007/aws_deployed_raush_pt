@@ -45,6 +45,7 @@ from app.services.appointment_sms_service import send_appointment_sms_if_needed
 from app.utils.time_utils import (
     parse_time_to_24hr,
     format_12hr,
+    iso_utc_z_to_la_parts,
     parse_booked_slots,
     get_available_slots,
     get_nearest_available_slots,
@@ -167,6 +168,36 @@ async def _attach_supabase_ids(appts: list[dict], rid: str) -> None:
         sb = await _supabase_appointment_id_for_tebra(str(tid), rid)
         if sb:
             a["supabase_appointment_id"] = sb
+
+
+async def _inbound_overlay_la_times_from_get_appointment(a: dict, rid: str) -> dict:
+    """
+    GetAppointments list StartDate can be wrong if TimeZoneOffsetFromGMT mismatches Tebra.
+    GetAppointment StartTime is UTC (…Z) — convert to LA for voice copy.
+    """
+    tid = (a.get("tebra_appointment_id") or "").strip()
+    if not tid:
+        return a
+    data = await call_tebra_get_appointment(tid, rid=rid)
+    if not data:
+        return a
+    parts = iso_utc_z_to_la_parts(data.get("StartTime"))
+    if not parts:
+        return a
+    d, h, mn = parts
+    out = dict(a)
+    out["appointment_date"] = d
+    out["appointment_time_24hr"] = f"{h:02d}:{mn:02d}"
+    out["appointment_time_12hr"] = format_12hr(h, mn)
+    logger.info(
+        "[%s] inbound lookup overlay GetAppointment tebra_id=%s -> %s %s (list raw was %r)",
+        rid,
+        tid,
+        d,
+        out["appointment_time_12hr"],
+        a.get("start_date_raw"),
+    )
+    return out
 
 
 def _format_inbound_locked_row(a: dict) -> str:
@@ -1349,9 +1380,11 @@ async def inbound_lookup_appointments(request: Request):
                     "That tebra_appointment_id is not in this patient's upcoming list. "
                     "Re-run listing without selected_tebra_appointment_id or pick a valid option.",
                 )
+            chosen = await _inbound_overlay_la_times_from_get_appointment(chosen, rid)
             return _inbound_lookup_vapi_response(rid, tool_call_id, _format_inbound_locked_row(chosen))
 
         if len(appts) == 1:
+            appts[0] = await _inbound_overlay_la_times_from_get_appointment(appts[0], rid)
             return _inbound_lookup_vapi_response(rid, tool_call_id, _format_inbound_locked_row(appts[0]))
 
         msg = _format_inbound_appointment_list(appts, TEBRA_INBOUND_APPOINTMENTS_WINDOW_DAYS)
