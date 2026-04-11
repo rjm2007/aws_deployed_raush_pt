@@ -6,6 +6,37 @@
 
 ---
 
+## Call flows (who calls what)
+
+### Outbound — new lead (lead agent)
+
+1. A lead exists in Supabase (`leads`, typically `queue_status=new` or retry states).
+2. **`scheduler_leads.py`** (Docker service or host) polls Supabase on a schedule, marks a row `in_progress`, and starts a **Vapi** outbound call using the lead assistant.
+3. The assistant uses tools on this API: **`check_availability`**, **`create_appointment`**, **`update-lead-status`**.
+4. **`create-appointment`** creates/updates the patient in **Tebra**, books the slot, inserts **`appointments`**, and may send SMS (via **`notification_log`** deduping).
+5. **`update-lead-status`** patches **`leads`** (`queue_status`, `lead_outcome`, notes, etc.).
+6. **`vapi-webhook`** receives end-of-call events and writes **`call_logs`** (and related bookkeeping).
+
+### Outbound — appointment reminder (24hr / 2hr)
+
+1. **`scheduler_reminders.py`** (Docker) queries **`appointments`** for upcoming visits with `reminder_sent_24hr` / `reminder_sent_2hr` still false (plus date/window rules in LA time).
+2. It places a **Vapi** reminder call with variables (appointment id, Tebra id, date, time, `reminder_type`, etc.).
+3. The reminder assistant uses **`confirm-appointment`** (confirm or cancel) and, for reschedules, **`check-availability`** + **`reschedule-appointment`**.
+4. Successful runs set the corresponding reminder flag on **`appointments`**; SMS paths may log to **`notification_log`**.
+
+### Inbound (scheduling assistant)
+
+1. Caller reaches the **Vapi** inbound assistant (no lead row required).
+2. Tools: **`check-availability`**, **`create-appointment`**, **`inbound-lookup-appointments`**, **`reschedule-appointment`**, **`update-inbound-status`**.
+3. **`update-inbound-status`** upserts **`inbound_calls`** keyed by Vapi **`call_id`** (`crm_status`, summary/notes, optional `appointment_id`, `route`, etc.).
+4. Booking/reschedule updates **Tebra** and **`appointments`** the same way as outbound; optional webhook path can still persist inbound metadata.
+
+### Local database reference
+
+Create **`database_schema.md`** in this `aws/` folder if you want a concise, code-oriented view of Supabase tables (see **`.gitignore`** — that filename is **not committed**). Draft it from the Supabase SQL editor / dashboard or keep a private copy outside git.
+
+---
+
 ## Clinic Locations
 
 Use these **exact strings** in the `location` field of any endpoint:
@@ -38,14 +69,15 @@ Use these strings in the `service` field:
 
 ---
 
-## Clinic Hours (PDT — California)
+## Clinic hours (summary — America/Los_Angeles)
 
-Appointments are only bookable in 30-minute slots within:
-- **7:00 AM – 2:00 PM**
-- **3:00 PM – 5:30 PM**
+Slots are **30 minutes** where the schedule allows; exact open windows are enforced in **`check-availability`** (Tebra + `time_utils`). By location:
 
-> **Time zone reminder for India (IST):** Add **+12 hours 30 minutes** to clinic time.  
-> Example: `9:00 AM PDT` → check Tebra at **9:30 PM IST same day**.
+- **Laguna Niguel / Dana Point:** Mon–Fri 7:00 AM–7:00 PM, Sat 7:00 AM–1:30 PM, Sun closed  
+- **Mission Viejo:** Mon–Fri 7:00 AM–5:00 PM, Sat–Sun closed  
+- **Fort Fitness - Laguna Hills:** Mon–Thu 8:00 AM–5:00 PM, Fri–Sat 8:00 AM–1:00 PM, Sun closed  
+
+> **IST note:** US Pacific vs India is roughly **+12:30** (DST shifts twice a year).
 
 ---
 
@@ -128,19 +160,19 @@ Updates the status of an existing appointment in Tebra (and optionally Supabase)
 
 ### `POST /api/v1/reschedule-appointment`
 
-Marks old appointment as Rescheduled in Tebra, creates a new one, and updates Supabase.
+**Deletes** the old visit in Tebra (`DeleteAppointment`), **creates** a new visit at the new time, then updates Supabase (old row → `rescheduled`, new row with `rescheduled_from_id`). Idempotent when Supabase already has the new row for the same old `appointment_id` + new date/time.
 
 | Field | Required | Example | Notes |
 |---|---|---|---|
 | `tebra_appointment_id` | ✅ | `33463` | Old Tebra appointment ID |
-| `appointment_id` | ✅ | `uuid-here` | Supabase UUID of the old appointment |
+| `appointment_id` | ❌ | `uuid-here` | Supabase UUID of the old row when it exists (omit for Tebra-only visits) |
 | `new_date` | ✅ | `2026-04-16` | YYYY-MM-DD |
 | `new_time` | ✅ | `10:00` | HH:MM 24-hr |
 | `location` | ❌ | `Dana Point` | Defaults to same location as original |
 | `service` | ❌ | `follow up` | Defaults to same service as original |
 | `lead_id` | ❌ | `uuid-here` | Supabase lead UUID |
 
-> If the new time slot is also taken, it rolls back and returns nearest alternatives.
+> New slot is checked **before** delete. If **create** fails after delete, there is **no** Tebra rollback (retries rely on Supabase idempotency + staff follow-up). If the new slot is taken before delete, the API returns alternatives without deleting.
 
 ---
 
@@ -186,6 +218,14 @@ Updates a lead record in Supabase after an outbound VAPI call.
 ### `POST /api/v1/vapi-webhook`
 
 End-of-call fallback — receives VAPI server events. Not useful to test manually via Swagger. VAPI posts to this automatically after every call.
+
+### `POST /api/v1/update-inbound-status` (inbound CRM)
+
+Upserts **`inbound_calls`** by `call_id`. Used by the inbound assistant only.
+
+### `POST /api/v1/inbound-lookup-appointments`
+
+Lists upcoming visits for reschedule (Tebra + Supabase enrichment). See OpenAPI for request fields.
 
 ---
 
