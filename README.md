@@ -128,10 +128,12 @@ Creates a patient (if not found) and books an appointment in Tebra + Supabase.
 | `date` | ✅ | `2026-04-15` | YYYY-MM-DD |
 | `time` | ✅ | `09:00` | HH:MM or natural (`9 AM`, `1:30 PM`) |
 | `name` | ✅ | `John Smith` | Patient full name |
-| `phone` | ✅ | `9491234567` | 10-digit, no dashes |
+| `phone` | ⚠️ | `+19491234567` | **Outbound (with `lead_id`):** pass patient phone. **Inbound (no `lead_id`):** omit — API uses **Vapi caller ID** from the tool request payload for Tebra / Supabase / SMS. |
 | `location` | ✅ | `Dana Point` | See locations table above |
 | `service` | ❌ | `evaluation` | Defaults to evaluation |
-| `lead_id` | ❌ | `uuid-here` | Supabase lead UUID — links appointment to lead |
+| `lead_id` | ❌ | `uuid-here` | Supabase lead UUID — links appointment to lead (outbound). Inbound bookings omit this. |
+
+> **Vapi inbound tool:** Make `phone` **optional** in the tool schema so the model does not collect it; the server still requires a resolvable number (from payload or `phone` for tests).
 
 **Test scenarios:**
 

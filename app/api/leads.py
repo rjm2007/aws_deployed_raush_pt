@@ -21,7 +21,12 @@ from app.services.supabase_service import (
     supabase_fetch_inbound_call_by_call_id,
     _insert_call_log,
 )
-from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments, vapi_response_content
+from app.utils.parser import (
+    build_vapi_response,
+    coerce_vapi_tool_arguments,
+    extract_vapi_caller_number_from_body,
+    vapi_response_content,
+)
 from app.services.twilio_service import twilio_send_sms
 
 router = APIRouter(tags=["Leads"])
@@ -117,21 +122,6 @@ def _extract_inbound_call_id_from_vapi(body: dict, request: Request | None = Non
     return None
 
 
-def _extract_inbound_caller_number_from_vapi(body: dict) -> str | None:
-    if not isinstance(body, dict):
-        return None
-    msg = body.get("message") if isinstance(body.get("message"), dict) else {}
-    cust = msg.get("customer") if isinstance(msg.get("customer"), dict) else {}
-    call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
-    return (
-        cust.get("number")
-        or cust.get("phoneNumber")
-        or call_obj.get("from")
-        or call_obj.get("fromNumber")
-        or (call_obj.get("customer", {}) or {}).get("number")
-    )
-
-
 def _preview_text(s: str | None, max_len: int = 240) -> str | None:
     if s is None:
         return None
@@ -205,7 +195,11 @@ async def update_inbound_status(request: Request):
             logger.info("[%s] update-inbound-status RESPONSE (validation) tool_call_id=%s message=%r", rid, tool_call_id, err_msg)
             return _log_inbound_status_return(rid, tool_call_id, err_msg)
 
-        caller_number = _normalize_phone(args.get("caller_number") or args.get("caller_phone") or _extract_inbound_caller_number_from_vapi(body))
+        caller_number = _normalize_phone(
+            args.get("caller_number")
+            or args.get("caller_phone")
+            or extract_vapi_caller_number_from_body(body)
+        )
         caller_name = args.get("caller_name") or args.get("patient_name") or args.get("name")
         appointment_id = args.get("appointment_id")
         location = args.get("location")

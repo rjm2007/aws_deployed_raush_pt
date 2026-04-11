@@ -100,7 +100,11 @@ class CreateAppointmentRequest(BaseModel):
     date: str = Field(..., example="2026-04-15", description="Date in YYYY-MM-DD format")
     time: str = Field(..., example="09:00", description="Time in HH:MM 24-hour or natural format like '9 AM'")
     name: str = Field(..., example="John Smith", description="Patient full name")
-    phone: str = Field(..., example="9491234567", description="Patient phone number")
+    phone: Optional[str] = Field(
+        None,
+        example="+19491234567",
+        description="Patient phone. Required for outbound (lead) bookings. For inbound (no lead_id), omit — API uses Vapi caller ID.",
+    )
     location: str = Field(..., example="Dana Point", description="Clinic location name")
     service: Optional[str] = Field(None, example="evaluation", description="Service name")
     lead_id: Optional[str] = Field(None, description="Supabase lead UUID")

@@ -45,3 +45,25 @@ def vapi_response_content(tool_call_id: str | None, message: str) -> dict:
 def build_vapi_response(tool_call_id: str | None, message: str):
     """Build the correct JSON response format for VAPI tool calls or direct HTTP tests."""
     return JSONResponse(content=vapi_response_content(tool_call_id, message))
+
+
+def extract_vapi_caller_number_from_body(body: dict | None) -> str | None:
+    """
+    Best-effort caller phone from a Vapi server/tool payload (voice: customer or call.from).
+    Used for inbound create_appointment so SMS and Supabase use the number the patient called from.
+    """
+    if not isinstance(body, dict):
+        return None
+    msg = body.get("message") if isinstance(body.get("message"), dict) else {}
+    cust = msg.get("customer") if isinstance(msg.get("customer"), dict) else {}
+    call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
+    raw = (
+        cust.get("number")
+        or cust.get("phoneNumber")
+        or call_obj.get("from")
+        or call_obj.get("fromNumber")
+        or (call_obj.get("customer", {}) or {}).get("number")
+    )
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None

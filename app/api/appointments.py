@@ -43,6 +43,7 @@ from app.services.supabase_service import (
     supabase_update_lead,
 )
 from app.services.appointment_sms_service import send_appointment_sms_if_needed
+from app.services.twilio_service import _format_phone_e164
 from app.utils.time_utils import (
     parse_time_to_24hr,
     format_12hr,
@@ -53,7 +54,7 @@ from app.utils.time_utils import (
     is_valid_clinic_slot,
     format_location_hours,
 )
-from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments
+from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments, extract_vapi_caller_number_from_body
 
 router = APIRouter(tags=["Appointments"])
 
@@ -308,15 +309,30 @@ async def create_appointment(request: Request):
 
         lead_id = _sanitize_supabase_lead_id(lead_id)
 
+        # ── Inbound (no lead_id): prefer Vapi caller ID over tool arg (ASR often wrong); SMS + Supabase use this ──
+        if not lead_id:
+            vapi_caller = extract_vapi_caller_number_from_body(body)
+            if vapi_caller:
+                phone = vapi_caller.strip()
+                logger.info("[%s] create-appointment: inbound — phone from Vapi caller ID", rid)
+        e164 = _format_phone_e164(phone) if phone else None
+        if e164:
+            phone = e164
+
         # ── Validate required fields ──
         missing = [f for f, v in {
-            "name": name, "phone": phone,
+            "name": name,
             "date": date, "time": time_str, "location": location
         }.items() if not v]
+        if not (phone and str(phone).strip()):
+            missing.append("phone")
         if missing:
+            hint = ""
+            if not lead_id and "phone" in missing:
+                hint = " (Could not read caller ID from this call — check Vapi payload or pass phone for testing.)"
             return build_vapi_response(
                 tool_call_id,
-                f"Missing required fields: {', '.join(missing)}. Please provide them to book."
+                f"Missing required fields: {', '.join(missing)}. Please provide them to book.{hint}"
             )
 
         # ── Validate date format ──
