@@ -34,6 +34,7 @@ from app.services.tebra_service import (
     create_patient,
     create_appointment_in_tebra,
     call_tebra_get_appointment,
+    call_tebra_delete_appointment,
     call_tebra_update_appointment,
 )
 from app.services.supabase_service import (
@@ -699,7 +700,7 @@ async def update_appointment_status(request: Request):
 
 @router.post(
     "/reschedule-appointment",
-    summary="Reschedule an existing appointment (mark old as Rescheduled, create new)",
+    summary="Reschedule: delete old Tebra appointment, create new (frees original slot)",
     openapi_extra={
         "requestBody": {
             "content": {"application/json": {"schema": inline_schema_refs(RescheduleAppointmentRequest.model_json_schema())}},
@@ -810,20 +811,7 @@ async def reschedule_appointment(request: Request):
                 f"Could not fetch appointment {tebra_appt_id} from Tebra. It may not exist."
             )
 
-        # ── Step 2: Mark old appointment as Rescheduled ──
-        old_appt["AppointmentStatus"] = "Rescheduled"
-        logger.info("[%s] STEP 2 → UpdateAppointment (old) tebra_id=%s → Rescheduled", rid, tebra_appt_id)
-        update_result = await call_tebra_update_appointment(old_appt, rid)
-        if not update_result["success"]:
-            return build_vapi_response(
-                tool_call_id,
-                f"Failed to mark old appointment as Rescheduled: {update_result['error']}"
-            )
-
-        # Rate limit guard — Tebra requires ½ second between calls
-        await asyncio.sleep(0.6)
-
-        # ── Resolve location_id and reason_id for new appointment ──
+        # ── Resolve location_id and reason_id for new appointment (before delete / slot check) ──
         patient_id  = old_appt["PatientId"]
         location_id = old_appt["ServiceLocationId"]
         reason_id   = old_appt.get("AppointmentReasonId", "0")
@@ -835,7 +823,7 @@ async def reschedule_appointment(request: Request):
         if new_service:
             reason_id = resolve_appointment_reason_id(new_service)
 
-        # ── Slot guard: verify new timeslot is free ──
+        # ── Slot guard: verify new timeslot is free (before removing old visit) ──
         tebra_loc_name = next(
             (v["name"] for v in LOCATION_MAP.values() if v["id"] == location_id),
             next((n for n, lid in TEBRA_VALID_NAMES.items() if lid == location_id), "")
@@ -850,15 +838,22 @@ async def reschedule_appointment(request: Request):
                     slots_str     = ", ".join(nearest_new) if nearest_new else "no open slots that day"
                     logger.warning("[%s] Reschedule slot conflict: %s is booked. Nearest: %s",
                                    rid, new_time, slots_str)
-                    # Rollback: un-mark old as Rescheduled
-                    old_appt["AppointmentStatus"] = "Scheduled"
-                    await asyncio.sleep(0.6)
-                    await call_tebra_update_appointment(old_appt, rid)
                     return build_vapi_response(
                         tool_call_id,
                         f"Sorry, {format_12hr(parsed_time[0], parsed_time[1])} is already taken. "
                         f"Ask the patient which of these works: {slots_str}."
                     )
+
+        # ── Step 2: Delete old appointment in Tebra (frees the original calendar slot) ──
+        logger.info("[%s] STEP 2 → DeleteAppointment tebra_id=%s", rid, tebra_appt_id)
+        delete_result = await call_tebra_delete_appointment(tebra_appt_id, rid)
+        if not delete_result["success"]:
+            return build_vapi_response(
+                tool_call_id,
+                f"Could not remove the old appointment from the schedule: {delete_result['error']}"
+            )
+
+        await asyncio.sleep(0.6)
 
         # ── Step 3: Create new appointment ──
         logger.info("[%s] STEP 3 → CreateAppointment (new) patient=%s date=%s time=%s loc=%s reason=%s",
@@ -868,15 +863,18 @@ async def reschedule_appointment(request: Request):
         )
 
         if not create_result["success"]:
-            # Rollback: try to un-reschedule old appointment
-            logger.error("[%s] CreateAppointment (new) FAILED — attempting rollback of old", rid)
-            old_appt["AppointmentStatus"] = "Scheduled"
-            await asyncio.sleep(0.6)
-            await call_tebra_update_appointment(old_appt, rid)
+            logger.error(
+                "[%s] CreateAppointment (new) FAILED after delete — no Tebra rollback; "
+                "idempotency/retry/manual follow-up per agent flow. error=%s",
+                rid,
+                create_result["error"],
+            )
             return build_vapi_response(
                 tool_call_id,
-                f"Could not create the new appointment: {create_result['error']}. "
-                f"The original appointment has been kept as Scheduled."
+                f"Could not create the new appointment after releasing the old time: {create_result['error']}. "
+                f"If this was a connection glitch and the visit actually booked, say so; otherwise use "
+                f"manual_follow_up / front desk. Retries: if Supabase already shows the new booking "
+                f"(same date and time), the idempotent check will confirm it."
             )
 
         new_tebra_id    = create_result["appointment_id"]

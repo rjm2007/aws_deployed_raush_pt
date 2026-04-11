@@ -570,6 +570,63 @@ async def call_tebra_get_appointment(tebra_appt_id: str, rid: str = "?") -> dict
     return data
 
 
+async def call_tebra_delete_appointment(tebra_appt_id: str, rid: str = "?") -> dict:
+    """Remove an appointment from the Tebra schedule (SOAP DeleteAppointment)."""
+    soap_body = f"""<?xml version="1.0" encoding="utf-8"?>
+<soapenv:Envelope
+  xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+  xmlns:sch="http://www.kareo.com/api/schemas/">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <sch:DeleteAppointment>
+      <sch:request>
+        <sch:RequestHeader>
+          <sch:CustomerKey>{CUSTOMER_KEY}</sch:CustomerKey>
+          <sch:Password>{TEBRA_PASSWORD}</sch:Password>
+          <sch:User>{TEBRA_USER}</sch:User>
+        </sch:RequestHeader>
+        <sch:Appointment>
+          <sch:AppointmentId>{tebra_appt_id}</sch:AppointmentId>
+        </sch:Appointment>
+      </sch:request>
+    </sch:DeleteAppointment>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://www.kareo.com/api/schemas/KareoServices/DeleteAppointment",
+    }
+
+    logger.info("[%s] DeleteAppointment apptId=%s", rid, tebra_appt_id)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(TEBRA_URL, content=soap_body, headers=headers)
+        xml = r.text
+
+    logger.info("[%s] DeleteAppointment status=%s length=%s", rid, r.status_code, len(xml))
+    logger.info("[%s] DeleteAppointment raw=%s", rid, xml)
+
+    fault = parse_soap_fault(xml)
+    if fault:
+        logger.error("[%s] DeleteAppointment soap_fault=%s", rid, fault)
+        return {"success": False, "error": fault}
+
+    is_error = re.search(r'<IsError>(true|false)</IsError>', xml)
+    if is_error and is_error.group(1).lower() == "true":
+        err = re.search(r"<ErrorMessage>([^<]+)</ErrorMessage>", xml)
+        error = err.group(1) if err else "Unknown Tebra error"
+        logger.error("[%s] DeleteAppointment tebra_error=%s", rid, error)
+        return {"success": False, "error": error}
+
+    deleted = re.search(r"<Deleted>(true|false)</Deleted>", xml)
+    if deleted and deleted.group(1).lower() == "false":
+        logger.error("[%s] DeleteAppointment Deleted=false", rid)
+        return {"success": False, "error": "Tebra reported the appointment was not deleted"}
+
+    logger.info("[%s] DeleteAppointment SUCCESS", rid)
+    return {"success": True, "error": None}
+
+
 async def call_tebra_update_appointment(appt_data: dict, rid: str = "?") -> dict:
     """Update an appointment in Tebra.
     appt_data must contain all required fields from GetAppointment.
