@@ -135,6 +135,8 @@ Creates a patient (if not found) and books an appointment in Tebra + Supabase.
 
 > **Vapi inbound tool:** Make `phone` **optional** in the tool schema so the model does not collect it; the server still requires a resolvable number (from payload or `phone` for tests).
 
+**Inbound `apiRequest` and caller ID:** For tools of type **`apiRequest`**, Vapi often sends only the LLM-filled body (e.g. `date`, `time`, `name`, `location`, `service`) with **no** `message` / `call` object — so the API cannot read caller ID unless you merge it in. On the **`create_appointment`** tool in the Vapi dashboard, add **static parameters** so the customer number is always included, for example: `{ "key": "phone", "value": "{{ customer.number }}" }`. Those values merge into the POST body and override an empty model-supplied `phone`. See Vapi docs: [Static variables and aliases](https://docs.vapi.ai/tools/static-variables-and-aliases).
+
 **Test scenarios:**
 
 1. **New patient** — use a name that doesn't exist in Tebra; it auto-creates the patient record

@@ -47,26 +47,53 @@ def build_vapi_response(tool_call_id: str | None, message: str):
     return JSONResponse(content=vapi_response_content(tool_call_id, message))
 
 
+def _caller_number_from_customer_dict(obj: dict | None) -> str | None:
+    if not isinstance(obj, dict):
+        return None
+    raw = obj.get("number") or obj.get("phoneNumber")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
 def extract_vapi_caller_number_from_body(body: dict | None) -> str | None:
     """
     Best-effort caller phone from a Vapi server/tool payload.
 
-    Typical inbound voice path: message.call.customer.number (check first).
-    Fallbacks: message.customer, call.from / fromNumber, call.customer.phoneNumber.
+    Typical inbound voice (function / server webhook): message.call.customer.number.
+    apiRequest tools often POST a flat JSON body (no message wrapper); if Vapi merges
+    static parameters (e.g. phone from {{ customer.number }}), that appears as top-level
+    fields. Also checks variableValues/variables.customer when present.
     """
     if not isinstance(body, dict):
         return None
     msg = body.get("message") if isinstance(body.get("message"), dict) else {}
     call_obj = msg.get("call") if isinstance(msg.get("call"), dict) else {}
-    call_customer = call_obj.get("customer") if isinstance(call_obj.get("customer"), dict) else {}
-    top_customer = msg.get("customer") if isinstance(msg.get("customer"), dict) else {}
+    top_call = body.get("call") if isinstance(body.get("call"), dict) else {}
+
+    for cust in (
+        call_obj.get("customer") if isinstance(call_obj.get("customer"), dict) else None,
+        msg.get("customer") if isinstance(msg.get("customer"), dict) else None,
+        top_call.get("customer") if isinstance(top_call.get("customer"), dict) else None,
+        body.get("customer") if isinstance(body.get("customer"), dict) else None,
+    ):
+        n = _caller_number_from_customer_dict(cust)
+        if n:
+            return n
+
+    for vv_key in ("variableValues", "variables"):
+        vv = body.get(vv_key)
+        if isinstance(vv, dict):
+            cust = vv.get("customer")
+            n = _caller_number_from_customer_dict(cust if isinstance(cust, dict) else None)
+            if n:
+                return n
+
     raw = (
-        call_customer.get("number")
-        or call_customer.get("phoneNumber")
-        or top_customer.get("number")
-        or top_customer.get("phoneNumber")
-        or call_obj.get("from")
+        call_obj.get("from")
         or call_obj.get("fromNumber")
+        or top_call.get("from")
+        or top_call.get("fromNumber")
     )
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
