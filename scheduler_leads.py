@@ -3,6 +3,7 @@
 #
 # Runs forever as its own container.
 # - Pulls leads from Supabase queues
+# - Only places calls during clinic office hours in America/Los_Angeles (configurable)
 # - Claims (marks in_progress) before calling to avoid double-calls
 # - Triggers Vapi outbound calls
 # - Writes logs to /code/logs/scheduler_leads.log
@@ -41,6 +42,10 @@ MIN_RETRY_AGE_MINUTES = int(os.getenv("LEADS_MIN_RETRY_AGE_MINUTES", "30"))
 # Batch fetch sizes (we still hard-cap actual calls per run)
 BATCH_SIZE = int(os.getenv("LEADS_BATCH_SIZE", "20"))
 
+# Same idea as reminder scheduler: no outbound dials outside LA office window
+LEADS_OFFICE_START_HOUR = int(os.getenv("LEADS_OFFICE_START_HOUR", "8"))  # inclusive
+LEADS_OFFICE_END_HOUR = int(os.getenv("LEADS_OFFICE_END_HOUR", "17"))  # exclusive
+
 
 def _setup_logger() -> logging.Logger:
     os.makedirs("logs", exist_ok=True)
@@ -78,6 +83,11 @@ def now_utc() -> datetime:
 
 def now_iso() -> str:
     return now_utc().isoformat()
+
+
+def in_leads_office_hours(dt_local: datetime) -> bool:
+    h = dt_local.hour
+    return LEADS_OFFICE_START_HOUR <= h < LEADS_OFFICE_END_HOUR
 
 
 def format_phone(phone: str) -> str | None:
@@ -164,6 +174,15 @@ async def trigger_vapi_call(assistant_id: str, phone: str, variable_values: dict
 async def job_call_new_leads():
     if not (SUPABASE_URL and SUPABASE_API_KEY and VAPI_API_KEY and VAPI_OUTBOUND_LEAD_ASSISTANT_ID and VAPI_PHONE_NUMBER_ID):
         logger.error("Missing required env vars for scheduler_leads; skipping run.")
+        return
+
+    now_la = datetime.now(LA_TZ)
+    if not in_leads_office_hours(now_la):
+        logger.info(
+            "job_call_new_leads skip (outside office hours %02d-%02d LA)",
+            LEADS_OFFICE_START_HOUR,
+            LEADS_OFFICE_END_HOUR,
+        )
         return
 
     logger.info("── job_call_new_leads START ──")
@@ -285,7 +304,13 @@ async def main():
         logger.error("STARTUP ERROR missing VAPI_OUTBOUND_LEAD_ASSISTANT_ID (or VAPI_LEAD_ASSISTANT_ID)")
         return
 
-    logger.info("[scheduler_leads] starting cron minutes=%s max_calls_per_run=%s", LEADS_CRON_MINUTES, MAX_CALLS_PER_RUN)
+    logger.info(
+        "[scheduler_leads] starting cron minutes=%s max_calls_per_run=%s office_hours=%02d-%02d LA",
+        LEADS_CRON_MINUTES,
+        MAX_CALLS_PER_RUN,
+        LEADS_OFFICE_START_HOUR,
+        LEADS_OFFICE_END_HOUR,
+    )
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(job_call_new_leads, "cron", minute=LEADS_CRON_MINUTES, id="leads_20min")
