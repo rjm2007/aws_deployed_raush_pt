@@ -7,6 +7,10 @@
 # - Claims (marks in_progress) before calling to avoid double-calls
 # - Triggers Vapi outbound calls
 # - Writes logs to /code/logs/scheduler_leads.log
+#
+# TEMP client / demo — near-instant outbound after a lead is inserted:
+#   LEADS_TEST_POLL_SECONDS=20
+#   (poll every N seconds; ignores LA office-hours gate while set; remove both for production.)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
@@ -30,8 +34,18 @@ VAPI_API_KEY = os.getenv("VAPI_API_KEY")
 VAPI_OUTBOUND_LEAD_ASSISTANT_ID = os.getenv("VAPI_OUTBOUND_LEAD_ASSISTANT_ID") or os.getenv("VAPI_LEAD_ASSISTANT_ID")
 VAPI_PHONE_NUMBER_ID = os.getenv("VAPI_PHONE_NUMBER_ID")
 
-# How often to try calling new leads
-LEADS_CRON_MINUTES = "0,20,40"  # every 20 minutes
+# How often to try calling new leads (production)
+LEADS_CRON_MINUTES = os.getenv("LEADS_CRON_MINUTES", "0,20,40")  # default: ~every 20 min at :00,:20,:40
+
+# TEMP: set e.g. 20 to poll every 20s instead of cron (unset = normal cron)
+_raw_test_poll = os.getenv("LEADS_TEST_POLL_SECONDS", "").strip()
+if _raw_test_poll:
+    try:
+        LEADS_TEST_POLL_SECONDS = max(10, min(300, int(_raw_test_poll)))
+    except ValueError:
+        LEADS_TEST_POLL_SECONDS = None
+else:
+    LEADS_TEST_POLL_SECONDS = None
 
 # Limits to stay under Vapi concurrency (global limit ~= 10)
 MAX_CALLS_PER_RUN = int(os.getenv("LEADS_MAX_CALLS_PER_RUN", "4"))
@@ -177,13 +191,20 @@ async def job_call_new_leads():
         return
 
     now_la = datetime.now(LA_TZ)
-    if not in_leads_office_hours(now_la):
+    # Production: respect LA office window. TEMP demo: LEADS_TEST_POLL_SECONDS skips this so clients can test anytime.
+    if LEADS_TEST_POLL_SECONDS is None:
+        if not in_leads_office_hours(now_la):
+            logger.info(
+                "job_call_new_leads skip (outside office hours %02d-%02d LA)",
+                LEADS_OFFICE_START_HOUR,
+                LEADS_OFFICE_END_HOUR,
+            )
+            return
+    else:
         logger.info(
-            "job_call_new_leads skip (outside office hours %02d-%02d LA)",
-            LEADS_OFFICE_START_HOUR,
-            LEADS_OFFICE_END_HOUR,
+            "TEST MODE job_call_new_leads (LEADS_TEST_POLL_SECONDS=%ss) — office hours check skipped for demo",
+            LEADS_TEST_POLL_SECONDS,
         )
-        return
 
     logger.info("── job_call_new_leads START ──")
 
@@ -304,16 +325,31 @@ async def main():
         logger.error("STARTUP ERROR missing VAPI_OUTBOUND_LEAD_ASSISTANT_ID (or VAPI_LEAD_ASSISTANT_ID)")
         return
 
-    logger.info(
-        "[scheduler_leads] starting cron minutes=%s max_calls_per_run=%s office_hours=%02d-%02d LA",
-        LEADS_CRON_MINUTES,
-        MAX_CALLS_PER_RUN,
-        LEADS_OFFICE_START_HOUR,
-        LEADS_OFFICE_END_HOUR,
-    )
+    if LEADS_TEST_POLL_SECONDS is not None:
+        logger.info(
+            "[scheduler_leads] TEST MODE poll every %ss (remove LEADS_TEST_POLL_SECONDS for production cron)",
+            LEADS_TEST_POLL_SECONDS,
+        )
+    else:
+        logger.info(
+            "[scheduler_leads] starting cron minutes=%s max_calls_per_run=%s office_hours=%02d-%02d LA",
+            LEADS_CRON_MINUTES,
+            MAX_CALLS_PER_RUN,
+            LEADS_OFFICE_START_HOUR,
+            LEADS_OFFICE_END_HOUR,
+        )
 
     scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(job_call_new_leads, "cron", minute=LEADS_CRON_MINUTES, id="leads_20min")
+    if LEADS_TEST_POLL_SECONDS is not None:
+        scheduler.add_job(
+            job_call_new_leads,
+            "interval",
+            seconds=LEADS_TEST_POLL_SECONDS,
+            id="leads_test_fast",
+            next_run_time=datetime.now(timezone.utc),
+        )
+    else:
+        scheduler.add_job(job_call_new_leads, "cron", minute=LEADS_CRON_MINUTES, id="leads_cron")
     scheduler.start()
 
     try:
