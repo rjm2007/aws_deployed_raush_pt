@@ -467,12 +467,23 @@ async def vapi_webhook(request: Request):
         # ── SMS notification (Twilio) for successful appointment outcomes ──
         # This runs on end-of-call reports and is safe to skip if not configured.
         # Only send if we have an appointment_id and the call was actually connected (not no-answer).
+        #
+        # IMPORTANT: Reminder calls must NOT trigger "booked" SMS on end-of-call.
+        # Reminders already have dedicated flows (confirm/cancel/reschedule) and
+        # reschedule endpoints send their own SMS. Sending "booked" here causes
+        # confusing duplicate messages after reschedule.
         try:
             if (
                 appointment_id
                 and not (isinstance(appointment_id, str) and appointment_id.startswith("{{"))
                 and ended_reason not in ("customer-did-not-answer", "silence-timed-out")
             ):
+                reminder_type = (variable_values.get("reminder_type") or "").strip().lower()
+                is_reminder_call = (assistant_id == VAPI_REMINDER_ASSISTANT_ID) or (reminder_type in ("24hr", "2hr"))
+                if is_reminder_call:
+                    logger.info("[%s] sms notification skipped — reminder call (assistant=%s reminder_type=%s appt_id=%s)",
+                                rid, assistant_id, reminder_type or None, appointment_id)
+                else:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     appt_rows = []
                     r_appt = await client.get(
