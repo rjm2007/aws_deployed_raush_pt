@@ -27,6 +27,17 @@ services:
     volumes:
       - ./logs:/code/logs
 
+  # Optional (client testing): sends intro SMS to new leads.
+  # Enable by running: docker compose up -d scheduler-leads-sms
+  scheduler-leads-sms:
+    build: .
+    container_name: scheduler-leads-sms
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "scheduler_leads_sms.py"]
+    volumes:
+      - ./logs:/code/logs
+
   caddy:
     image: caddy:2-alpine
     container_name: caddy
