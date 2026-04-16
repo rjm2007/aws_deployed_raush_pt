@@ -172,6 +172,20 @@ async def supabase_insert_sms_conversation(row: dict) -> bool:
         return False
 
 
+async def supabase_patch(path: str, data: dict) -> bool:
+    url = f"{SUPABASE_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            r = await client.patch(url, headers=SUPABASE_HEADERS, json=data)
+            if r.status_code in (200, 204):
+                return True
+            logger.warning("supabase_patch status=%s body=%s", r.status_code, (r.text or "")[:300])
+            return False
+    except Exception as e:
+        logger.exception("supabase_patch exception: %s", e)
+        return False
+
+
 async def already_sent_for_lead(lead_id: str) -> bool:
     try:
         rows = await supabase_get(
@@ -267,6 +281,16 @@ async def send_intro_for_lead(lead: dict) -> None:
                 "intent": None,
                 "twilio_sid": sid,
             }
+        )
+    else:
+        # Try only once: move the lead out of `new` so it won't be retried on the next poll.
+        await supabase_patch(
+            f"/rest/v1/leads?id=eq.{lead_id}",
+            {
+                "queue_status": "manual_follow_up",
+                "notes": f"[sms_lead_intro_failed] {err}",
+                "updated_at": now_iso(),
+            },
         )
 
 
