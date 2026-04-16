@@ -154,6 +154,24 @@ async def supabase_insert_notification_log(row: dict) -> bool:
         return False
 
 
+async def supabase_insert_sms_conversation(row: dict) -> bool:
+    """
+    Insert a row into `public.sms_conversations`.
+    Kept intentionally minimal: we only set fields we actually know.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/sms_conversations"
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            r = await client.post(url, headers=SUPABASE_HEADERS, json=row)
+            if r.status_code in (200, 201):
+                return True
+            logger.warning("insert_sms_conversation status=%s body=%s", r.status_code, (r.text or "")[:300])
+            return False
+    except Exception as e:
+        logger.exception("insert_sms_conversation exception: %s", e)
+        return False
+
+
 async def already_sent_for_lead(lead_id: str) -> bool:
     try:
         rows = await supabase_get(
@@ -200,17 +218,27 @@ async def send_intro_for_lead(lead: dict) -> None:
     if not lead_id or not phone:
         return
 
+    phone_e164 = _format_phone_e164(phone)
+    if not phone_e164:
+        return
+
     if await already_sent_for_lead(lead_id):
         return
 
     body = build_intro_sms(lead)
-    logger.info("lead_intro candidate lead_id=%s phone=%s dry_run=%s", lead_id, phone, DRY_RUN)
+    logger.info(
+        "lead_intro candidate lead_id=%s phone=%s e164=%s dry_run=%s",
+        lead_id,
+        phone,
+        phone_e164,
+        DRY_RUN,
+    )
 
     if DRY_RUN:
         logger.info("DRY_RUN sms body=%r", body)
         return
 
-    ok, sid, err = await twilio_send_sms(phone, body)
+    ok, sid, err = await twilio_send_sms(phone_e164, body)
     await supabase_insert_notification_log(
         {
             "lead_id": lead_id,
@@ -224,6 +252,22 @@ async def send_intro_for_lead(lead: dict) -> None:
         }
     )
     logger.info("lead_intro sms ok=%s sid=%s err=%s lead_id=%s", ok, sid, err, lead_id)
+
+    # Save what we sent into the SMS conversation table (future multi-turn context).
+    if ok:
+        await supabase_insert_sms_conversation(
+            {
+                "phone_number": phone_e164,
+                "lead_id": lead_id,
+                "appointment_id": None,
+                "practice_id": None,
+                "role": "assistant",
+                "message": body,
+                "direction": "outbound",
+                "intent": None,
+                "twilio_sid": sid,
+            }
+        )
 
 
 async def poll_once() -> None:
