@@ -9,5 +9,6 @@ COPY app/ app/
 COPY main.py .
 COPY scheduler_leads.py .
 COPY scheduler_reminders.py .
+COPY scheduler_leads_sms.py .
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
