@@ -121,7 +121,7 @@ def build_intro_sms(lead: dict) -> str:
     msg += f" We saw your interest in {service}."
     if location:
         msg += f" Preferred location: {location}."
-    msg += " Would you like to continue and book an appointment? Reply YES and we’ll reach out."
+    msg += " I can help you setup an appointment here on the text."
     return msg.strip()
 
 
