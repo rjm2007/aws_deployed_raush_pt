@@ -60,6 +60,9 @@ BATCH_SIZE = int(os.getenv("LEADS_BATCH_SIZE", "20"))
 LEADS_OFFICE_START_HOUR = int(os.getenv("LEADS_OFFICE_START_HOUR", "8"))  # inclusive
 LEADS_OFFICE_END_HOUR = int(os.getenv("LEADS_OFFICE_END_HOUR", "17"))  # exclusive
 
+# How many minutes after the intro SMS to trigger the outbound call (default 10)
+SMS_TO_CALL_DELAY_MINUTES = int(os.getenv("LEADS_SMS_TO_CALL_DELAY_MINUTES", "10"))
+
 
 def _setup_logger() -> logging.Logger:
     os.makedirs("logs", exist_ok=True)
@@ -213,30 +216,37 @@ async def job_call_new_leads():
         "/rest/v1/leads"
         "?queue_status=eq.new"
         "&call_attempts=lt.3"
-        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at"
+        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at,sms_sent_at"
         "&order=created_at.asc"
         f"&limit={BATCH_SIZE}"
     )
 
     # Retry leads: only if stale enough
-    # Note: Supabase REST filtering on updated_at is possible but depends on column type; do it in Python reliably.
     retry_candidates = await supabase_get(
         "/rest/v1/leads"
         "?queue_status=eq.in_progress"
         "&call_attempts=lt.3"
-        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at"
+        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at,sms_sent_at"
         "&order=updated_at.asc"
         f"&limit={BATCH_SIZE}"
     )
 
-    callback_leads = []
     now_z = now_utc().strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
     callback_leads = await supabase_get(
         "/rest/v1/leads"
         "?queue_status=eq.follow_up"
         f"&callback_requested_at=lte.{now_z}"
-        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at"
+        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at,sms_sent_at"
         "&order=callback_requested_at.asc"
+        f"&limit={BATCH_SIZE}"
+    )
+
+    # message_sent leads: SMS was sent, now wait LEADS_SMS_TO_CALL_DELAY_MINUTES before calling
+    sms_sent_candidates = await supabase_get(
+        "/rest/v1/leads"
+        "?queue_status=eq.message_sent"
+        "&select=id,full_name,phone,service_of_interest,preferred_location,call_attempts,created_at,updated_at,sms_sent_at"
+        "&order=sms_sent_at.asc"
         f"&limit={BATCH_SIZE}"
     )
 
@@ -248,7 +258,6 @@ async def job_call_new_leads():
     for l in (retry_candidates or []):
         ts = l.get("updated_at") or ""
         try:
-            # ISO parse best-effort; if it fails, treat as eligible (better to call than starve)
             updated = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None
         except Exception:
             updated = None
@@ -256,6 +265,17 @@ async def job_call_new_leads():
             leads.append(l)
 
     leads.extend(callback_leads or [])
+
+    # message_sent → only call if the SMS was sent at least SMS_TO_CALL_DELAY_MINUTES ago
+    sms_cutoff = now_utc() - timedelta(minutes=SMS_TO_CALL_DELAY_MINUTES)
+    for l in (sms_sent_candidates or []):
+        ts = l.get("sms_sent_at") or l.get("updated_at") or ""
+        try:
+            sms_ts = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None
+        except Exception:
+            sms_ts = None
+        if sms_ts is None or sms_ts <= sms_cutoff:
+            leads.append(l)
 
     if not leads:
         logger.info("No leads to call; done.")
@@ -307,7 +327,10 @@ async def job_call_new_leads():
         )
         if call_obj is None:
             # revert claim so it can be retried later
-            await supabase_patch(f"/rest/v1/leads?id=eq.{lead_id}", {"queue_status": "new", "updated_at": now_iso()})
+            # message_sent leads revert to message_sent (SMS already done); others revert to new
+            prev_status = lead.get("queue_status", "new")
+            revert_to = "message_sent" if prev_status == "message_sent" else "new"
+            await supabase_patch(f"/rest/v1/leads?id=eq.{lead_id}", {"queue_status": revert_to, "updated_at": now_iso()})
         else:
             calls_started += 1
 
@@ -332,11 +355,12 @@ async def main():
         )
     else:
         logger.info(
-            "[scheduler_leads] starting cron minutes=%s max_calls_per_run=%s office_hours=%02d-%02d LA",
+            "[scheduler_leads] starting cron minutes=%s max_calls_per_run=%s office_hours=%02d-%02d LA sms_to_call_delay=%smin",
             LEADS_CRON_MINUTES,
             MAX_CALLS_PER_RUN,
             LEADS_OFFICE_START_HOUR,
             LEADS_OFFICE_END_HOUR,
+            SMS_TO_CALL_DELAY_MINUTES,
         )
 
     scheduler = AsyncIOScheduler(timezone="UTC")

@@ -118,10 +118,10 @@ def build_intro_sms(lead: dict) -> str:
     location = (lead.get("preferred_location") or "").strip()
 
     msg = f"Hi {first}, this is Rausch Physical Therapy."
-    msg += f" We saw your interest in {service}."
+    msg += f" We noticed you were interested in {service}"
     if location:
-        msg += f" Preferred location: {location}."
-    msg += " I can help you setup an appointment here on the text."
+        msg += f" at our {location} location"
+    msg += ". We'd love to help you get started — feel free to text us here and we can set something up for you."
     return msg.strip()
 
 
@@ -282,6 +282,16 @@ async def send_intro_for_lead(lead: dict) -> None:
                 "twilio_sid": sid,
             }
         )
+        # Move lead to message_sent so the call scheduler knows to call after the delay.
+        await supabase_patch(
+            f"/rest/v1/leads?id=eq.{lead_id}",
+            {
+                "queue_status": "message_sent",
+                "sms_sent_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+        )
+        logger.info("lead_intro moved to message_sent lead_id=%s", lead_id)
     else:
         # Try only once: move the lead out of `new` so it won't be retried on the next poll.
         await supabase_patch(
