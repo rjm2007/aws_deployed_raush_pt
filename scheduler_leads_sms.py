@@ -128,13 +128,16 @@ def build_intro_sms(lead: dict) -> str:
 async def supabase_get(path: str) -> list:
     url = f"{SUPABASE_URL}{path}"
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.get(url, headers=SUPABASE_HEADERS)
             if r.status_code == 200:
                 data = r.json()
                 return data if isinstance(data, list) else []
             logger.warning("supabase_get status=%s body=%s", r.status_code, (r.text or "")[:300])
             return []
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        logger.warning("supabase_get transient error: %s", e)
+        return []
     except Exception as e:
         logger.exception("supabase_get exception: %s", e)
         return []
@@ -143,12 +146,15 @@ async def supabase_get(path: str) -> list:
 async def supabase_insert_notification_log(row: dict) -> bool:
     url = f"{SUPABASE_URL}/rest/v1/notification_log"
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(url, headers=SUPABASE_HEADERS, json=row)
             if r.status_code in (200, 201):
                 return True
             logger.warning("insert_notification_log status=%s body=%s", r.status_code, (r.text or "")[:300])
             return False
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        logger.warning("insert_notification_log transient error: %s", e)
+        return False
     except Exception as e:
         logger.exception("insert_notification_log exception: %s", e)
         return False
@@ -161,12 +167,15 @@ async def supabase_insert_sms_conversation(row: dict) -> bool:
     """
     url = f"{SUPABASE_URL}/rest/v1/sms_conversations"
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(url, headers=SUPABASE_HEADERS, json=row)
             if r.status_code in (200, 201):
                 return True
             logger.warning("insert_sms_conversation status=%s body=%s", r.status_code, (r.text or "")[:300])
             return False
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        logger.warning("insert_sms_conversation transient error: %s", e)
+        return False
     except Exception as e:
         logger.exception("insert_sms_conversation exception: %s", e)
         return False
@@ -175,12 +184,15 @@ async def supabase_insert_sms_conversation(row: dict) -> bool:
 async def supabase_patch(path: str, data: dict) -> bool:
     url = f"{SUPABASE_URL}{path}"
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.patch(url, headers=SUPABASE_HEADERS, json=data)
             if r.status_code in (200, 204):
                 return True
             logger.warning("supabase_patch status=%s body=%s", r.status_code, (r.text or "")[:300])
             return False
+    except (httpx.TimeoutException, httpx.TransportError) as e:
+        logger.warning("supabase_patch transient error: %s", e)
+        return False
     except Exception as e:
         logger.exception("supabase_patch exception: %s", e)
         return False
