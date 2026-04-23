@@ -1,6 +1,7 @@
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -8,11 +9,17 @@ from fastapi.responses import JSONResponse
 from app.core.config import (
     SUPABASE_URL,
     SUPABASE_HEADERS,
+    SUPABASE_PRACTICE_ID,
     VAPI_REMINDER_ASSISTANT_ID,
     VAPI_INBOUND_ASSISTANT_ID,
 )
 from app.core.logger import logger
-from app.models.requests import UpdateInboundStatusRequest, UpdateLeadStatusRequest, inline_schema_refs
+from app.models.requests import (
+    InboundCallerLookupRequest,
+    UpdateInboundStatusRequest,
+    UpdateLeadStatusRequest,
+    inline_schema_refs,
+)
 from app.services.supabase_service import (
     supabase_update_lead,
     supabase_insert_scheduled_callback,
@@ -254,6 +261,173 @@ async def update_inbound_status(request: Request):
 async def inbound_call_event(request: Request):
     # Backward-compatible alias (some VAPI tools may still point here).
     return await update_inbound_status(request)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENDPOINT: INBOUND CALLER LOOKUP (Supabase-only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _phone_digits_variants(phone: str) -> list[str]:
+    """Return digits-only variants of a phone to match DB rows stored in different formats."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if not digits:
+        return []
+    variants: set[str] = set()
+    variants.add(digits)
+    if len(digits) == 11 and digits.startswith("1"):
+        variants.add(digits[1:])
+    if len(digits) == 10:
+        variants.add("1" + digits)
+    out: set[str] = set()
+    for d in variants:
+        out.add(d)
+        out.add("+" + d)
+    return list(out)
+
+
+async def _fetch_lead_by_phone(phone_variants: list[str]) -> dict | None:
+    if not phone_variants:
+        return None
+    in_list = ",".join(f'"{v}"' for v in phone_variants)
+    params = [
+        ("select", "id,full_name,phone,service_of_interest,preferred_location,queue_status,tebra_patient_id,created_at,updated_at"),
+        ("phone", f"in.({in_list})"),
+        ("order", "updated_at.desc"),
+        ("limit", "1"),
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{SUPABASE_URL}/rest/v1/leads", headers=SUPABASE_HEADERS, params=params)
+            if r.status_code == 200:
+                rows = r.json() or []
+                return rows[0] if rows else None
+            logger.warning("caller_lookup leads status=%s body=%s", r.status_code, (r.text or "")[:200])
+    except Exception as e:
+        logger.warning("caller_lookup leads exception: %s", e)
+    return None
+
+
+async def _fetch_upcoming_appointments_by_phone(phone_variants: list[str]) -> list[dict]:
+    if not phone_variants:
+        return []
+    la = ZoneInfo("America/Los_Angeles")
+    today = datetime.now(la).date().isoformat()
+    in_list = ",".join(f'"{v}"' for v in phone_variants)
+    params = [
+        ("select", "id,tebra_appointment_id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,lead_id"),
+        ("patient_phone", f"in.({in_list})"),
+        ("appointment_date", f"gte.{today}"),
+        ("status", "in.(scheduled,confirmed)"),
+        ("or", f"(practice_id.eq.{SUPABASE_PRACTICE_ID},practice_id.is.null)"),
+        ("order", "appointment_date.asc,appointment_time.asc"),
+        ("limit", "10"),
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{SUPABASE_URL}/rest/v1/appointments", headers=SUPABASE_HEADERS, params=params)
+            if r.status_code == 200:
+                rows = r.json() or []
+                return rows if isinstance(rows, list) else []
+            logger.warning("caller_lookup appts status=%s body=%s", r.status_code, (r.text or "")[:200])
+    except Exception as e:
+        logger.warning("caller_lookup appts exception: %s", e)
+    return []
+
+
+def _format_time_hm(raw) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+    except ValueError:
+        return None
+
+
+@router.post(
+    "/inbound-caller-lookup",
+    summary="Inbound tool: look up caller by phone (Supabase leads + upcoming appointments)",
+    openapi_extra={
+        "requestBody": {
+            "content": {"application/json": {"schema": inline_schema_refs(InboundCallerLookupRequest.model_json_schema())}},
+            "required": False,
+        }
+    },
+)
+async def inbound_caller_lookup(request: Request):
+    """
+    Inbound-agent first tool. Looks the caller up by phone number in Supabase only
+    (no Tebra call). Returns lead details + upcoming appointments.
+
+    Phone source priority:
+      1. `phone` field in request body (for Swagger / manual testing)
+      2. Vapi wrapper caller ID (message.call.customer.number)
+    """
+    rid = uuid4().hex[:8]
+    tool_call_id: str | None = None
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    tool_call_id, args = _extract_tool_args(body if isinstance(body, dict) else {})
+    arg_phone = (args.get("phone") if isinstance(args, dict) else None) or None
+    vapi_phone = extract_vapi_caller_number_from_body(body if isinstance(body, dict) else None)
+    phone_raw = (arg_phone or vapi_phone or "").strip()
+
+    logger.info("[%s] inbound-caller-lookup phone_arg=%r vapi_phone=%r", rid, arg_phone, vapi_phone)
+
+    if not phone_raw:
+        msg = "No caller phone available. Please ask the caller for their name and continue normally."
+        return build_vapi_response(tool_call_id, msg)
+
+    variants = _phone_digits_variants(phone_raw)
+    lead = await _fetch_lead_by_phone(variants)
+    appts = await _fetch_upcoming_appointments_by_phone(variants)
+
+    upcoming = []
+    for a in appts:
+        upcoming.append({
+            "appointment_id": a.get("id"),
+            "tebra_appointment_id": a.get("tebra_appointment_id"),
+            "date": a.get("appointment_date"),
+            "time": _format_time_hm(a.get("appointment_time")),
+            "location": a.get("location"),
+            "service": a.get("service"),
+            "status": a.get("status"),
+            "patient_name": a.get("patient_name"),
+        })
+
+    found = bool(lead) or bool(upcoming)
+    full_name = (lead or {}).get("full_name") or (upcoming[0]["patient_name"] if upcoming else None)
+    first_name = (full_name or "").strip().split()[0] if full_name else None
+
+    result = {
+        "found": found,
+        "phone": phone_raw,
+        "lead_id": (lead or {}).get("id"),
+        "full_name": full_name,
+        "first_name": first_name,
+        "service_of_interest": (lead or {}).get("service_of_interest"),
+        "preferred_location": (lead or {}).get("preferred_location"),
+        "tebra_patient_id": (lead or {}).get("tebra_patient_id"),
+        "has_upcoming_appointment": bool(upcoming),
+        "upcoming": upcoming,
+    }
+
+    logger.info(
+        "[%s] inbound-caller-lookup found=%s lead_id=%s upcoming=%d name=%r",
+        rid, found, result["lead_id"], len(upcoming), full_name,
+    )
+
+    # Vapi tool returns must be a string; serialize JSON so the assistant can parse it.
+    import json as _json
+    return build_vapi_response(tool_call_id, _json.dumps(result, separators=(",", ":")))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

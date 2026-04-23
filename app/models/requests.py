@@ -205,3 +205,15 @@ class InboundLookupAppointmentsRequest(BaseModel):
         example="9495551212",
         description="Ignored.",
     )
+
+
+class InboundCallerLookupRequest(BaseModel):
+    """Look up a caller in Supabase by phone number (inbound-agent first tool call)."""
+    phone: Optional[str] = Field(
+        None,
+        example="+19495551212",
+        description=(
+            "Optional. Caller phone number. If omitted, the server reads caller ID from the Vapi webhook "
+            "(message.call.customer.number). Use this field only for Swagger / manual testing."
+        ),
+    )
