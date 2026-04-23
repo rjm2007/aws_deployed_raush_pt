@@ -285,26 +285,27 @@ def _phone_digits_variants(phone: str) -> list[str]:
     return list(out)
 
 
-async def _fetch_lead_by_phone(phone_variants: list[str]) -> dict | None:
+async def _fetch_leads_by_phone(phone_variants: list[str]) -> list[dict]:
+    """Return ALL leads sharing this phone (multiple family members / typos share numbers)."""
     if not phone_variants:
-        return None
+        return []
     in_list = ",".join(f'"{v}"' for v in phone_variants)
     params = [
         ("select", "id,full_name,phone,service_of_interest,preferred_location,queue_status,tebra_patient_id,created_at,updated_at"),
         ("phone", f"in.({in_list})"),
         ("order", "updated_at.desc"),
-        ("limit", "1"),
+        ("limit", "10"),
     ]
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{SUPABASE_URL}/rest/v1/leads", headers=SUPABASE_HEADERS, params=params)
             if r.status_code == 200:
                 rows = r.json() or []
-                return rows[0] if rows else None
+                return rows if isinstance(rows, list) else []
             logger.warning("caller_lookup leads status=%s body=%s", r.status_code, (r.text or "")[:200])
     except Exception as e:
         logger.warning("caller_lookup leads exception: %s", e)
-    return None
+    return []
 
 
 async def _fetch_upcoming_appointments_by_phone(phone_variants: list[str]) -> list[dict]:
@@ -387,7 +388,7 @@ async def inbound_caller_lookup(request: Request):
         return build_vapi_response(tool_call_id, msg)
 
     variants = _phone_digits_variants(phone_raw)
-    lead = await _fetch_lead_by_phone(variants)
+    leads = await _fetch_leads_by_phone(variants)
     appts = await _fetch_upcoming_appointments_by_phone(variants)
 
     upcoming = []
@@ -403,35 +404,75 @@ async def inbound_caller_lookup(request: Request):
             "patient_name": a.get("patient_name"),
         })
 
-    found = bool(lead) or bool(upcoming)
-    full_name = (lead or {}).get("full_name") or (upcoming[0]["patient_name"] if upcoming else None)
-    first_name = (full_name or "").strip().split()[0] if full_name else None
+    # Build compact lead summaries for the assistant.
+    lead_summaries: list[dict] = []
+    for l in leads:
+        lead_summaries.append({
+            "lead_id": l.get("id"),
+            "full_name": l.get("full_name"),
+            "first_name": (l.get("full_name") or "").strip().split()[0] if l.get("full_name") else None,
+            "service_of_interest": l.get("service_of_interest"),
+            "preferred_location": l.get("preferred_location"),
+            "tebra_patient_id": l.get("tebra_patient_id"),
+        })
 
-    # Flatten the next upcoming appointment to top-level for easy prompt use.
+    # Unique candidate names across leads + upcoming appointments (preserve order).
+    candidate_names: list[str] = []
+    seen = set()
+    for name in [l.get("full_name") for l in leads] + [u.get("patient_name") for u in upcoming]:
+        if not name:
+            continue
+        key = name.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate_names.append(name.strip())
+
+    found = bool(leads) or bool(upcoming)
+    multiple = len(candidate_names) > 1
+    primary_lead = leads[0] if leads else None
+    full_name = (primary_lead or {}).get("full_name") or (upcoming[0]["patient_name"] if upcoming else None)
+    first_name = (full_name or "").strip().split()[0] if full_name else None
     next_appt = upcoming[0] if upcoming else None
 
-    if found:
-        if next_appt:
-            message = (
-                f"Returning caller {full_name or ''}".strip()
-                + f". Upcoming visit on {next_appt['date']} at {next_appt['time']} "
-                + f"at {next_appt.get('location') or 'the clinic'}."
-            )
-        else:
-            message = f"Returning caller {full_name or ''}. No upcoming appointments.".strip()
-    else:
+    if not found:
         message = "No record found for this phone number. Greet generically and collect details."
+    elif multiple:
+        first_names = [n.split()[0] for n in candidate_names]
+        if len(first_names) == 2:
+            names_phrase = f"{first_names[0]} or {first_names[1]}"
+        else:
+            names_phrase = ", ".join(first_names[:-1]) + f", or {first_names[-1]}"
+        message = (
+            f"{len(candidate_names)} records are linked to this phone number "
+            f"({', '.join(candidate_names)}). Ask the caller whether they are "
+            f"{names_phrase}, then continue using that person's details."
+        )
+    elif next_appt:
+        message = (
+            f"Returning caller {full_name or ''}.".strip()
+            + f" Upcoming visit on {next_appt['date']} at {next_appt['time']} "
+            + f"at {next_appt.get('location') or 'the clinic'}."
+        )
+    else:
+        message = f"Returning caller {full_name or ''}. No upcoming appointments.".strip()
 
     result = {
         "found": found,
+        "multiple_matches": multiple,
+        "match_count": len(candidate_names),
+        "candidate_names": candidate_names,
         "message": message,
         "phone": phone_raw,
-        "lead_id": (lead or {}).get("id"),
+        # Primary (most recently updated) lead fields � only reliable when multiple_matches is false.
+        "lead_id": (primary_lead or {}).get("id"),
         "full_name": full_name,
         "first_name": first_name,
-        "service_of_interest": (lead or {}).get("service_of_interest"),
-        "preferred_location": (lead or {}).get("preferred_location"),
-        "tebra_patient_id": (lead or {}).get("tebra_patient_id"),
+        "service_of_interest": (primary_lead or {}).get("service_of_interest"),
+        "preferred_location": (primary_lead or {}).get("preferred_location"),
+        "tebra_patient_id": (primary_lead or {}).get("tebra_patient_id"),
+        # Full list of leads sharing this number (use this when multiple_matches is true).
+        "leads": lead_summaries,
         "has_upcoming_appointment": bool(upcoming),
         # Flattened fields for the next upcoming appointment (null when none).
         "next_appointment_id": (next_appt or {}).get("appointment_id"),
@@ -446,8 +487,8 @@ async def inbound_caller_lookup(request: Request):
     }
 
     logger.info(
-        "[%s] inbound-caller-lookup found=%s lead_id=%s upcoming=%d name=%r",
-        rid, found, result["lead_id"], len(upcoming), full_name,
+        "[%s] inbound-caller-lookup found=%s leads=%d upcoming=%d candidates=%r",
+        rid, found, len(leads), len(upcoming), candidate_names,
     )
 
     # Vapi tool returns must be a string; serialize JSON so the assistant can parse it.
