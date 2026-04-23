@@ -73,3 +73,5 @@ Deployment_steps.md
 
 # Local-only schema notes (not committed)
 database_schema.md
+database_understanding.md
+db_commands.md

@@ -117,7 +117,7 @@ def build_intro_sms(lead: dict) -> str:
     service = (lead.get("service_of_interest") or "physical therapy").strip()
     location = (lead.get("preferred_location") or "").strip()
 
-    msg = f"Hi {first}, this is Rausch Physical Therapy."
+    msg = f"Hi {first}, this is Rausch Physical Therapy & Wellness."
     msg += f" We noticed you were interested in {service}"
     if location:
         msg += f" at our {location} location"

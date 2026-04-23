@@ -27,7 +27,7 @@ def build_appointment_sms(notification_type: str, appt: dict) -> str:
         header = "Your appointment has been booked."
 
     return (
-        "RAUSCH PHYSICAL THERAPY\n"
+        "RAUSCH PHYSICAL THERAPY & WELLNESS\n"
         f"{header}\n\n"
         f"Name: {patient_name}\n"
         f"Location: {appt_location}\n"

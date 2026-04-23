@@ -528,7 +528,7 @@ async def vapi_webhook(request: Request):
                                 else:
                                     notification_type = "sms_appointment_confirmed" if status == "confirmed" else "sms_appointment_booked"
                                 sms_body = (
-                                    "RAUSCH PHYSICAL THERAPY\n"
+                                    "RAUSCH PHYSICAL THERAPY & WELLNESS\n"
                                     f"Your appointment has been {'rescheduled' if was_rescheduled else ('confirmed' if status == 'confirmed' else 'booked')}.\n\n"
                                     f"Name: {patient_name}\n"
                                     f"Location: {appt_location}\n"
@@ -540,7 +540,7 @@ async def vapi_webhook(request: Request):
                             elif status == "cancelled":
                                 notification_type = "sms_appointment_cancelled"
                                 sms_body = (
-                                    "RAUSCH PHYSICAL THERAPY\n"
+                                    "RAUSCH PHYSICAL THERAPY & WELLNESS\n"
                                     "Your appointment has been cancelled.\n\n"
                                     f"Name: {patient_name}\n"
                                     f"Location: {appt_location}\n"
