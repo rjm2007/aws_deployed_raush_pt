@@ -75,3 +75,6 @@ Deployment_steps.md
 database_schema.md
 database_understanding.md
 db_commands.md
+
+# Local-only prompt drafts (not committed)
+prompt/
