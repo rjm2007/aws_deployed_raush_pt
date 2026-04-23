@@ -407,8 +407,24 @@ async def inbound_caller_lookup(request: Request):
     full_name = (lead or {}).get("full_name") or (upcoming[0]["patient_name"] if upcoming else None)
     first_name = (full_name or "").strip().split()[0] if full_name else None
 
+    # Flatten the next upcoming appointment to top-level for easy prompt use.
+    next_appt = upcoming[0] if upcoming else None
+
+    if found:
+        if next_appt:
+            message = (
+                f"Returning caller {full_name or ''}".strip()
+                + f". Upcoming visit on {next_appt['date']} at {next_appt['time']} "
+                + f"at {next_appt.get('location') or 'the clinic'}."
+            )
+        else:
+            message = f"Returning caller {full_name or ''}. No upcoming appointments.".strip()
+    else:
+        message = "No record found for this phone number. Greet generically and collect details."
+
     result = {
         "found": found,
+        "message": message,
         "phone": phone_raw,
         "lead_id": (lead or {}).get("id"),
         "full_name": full_name,
@@ -417,6 +433,15 @@ async def inbound_caller_lookup(request: Request):
         "preferred_location": (lead or {}).get("preferred_location"),
         "tebra_patient_id": (lead or {}).get("tebra_patient_id"),
         "has_upcoming_appointment": bool(upcoming),
+        # Flattened fields for the next upcoming appointment (null when none).
+        "next_appointment_id": (next_appt or {}).get("appointment_id"),
+        "next_tebra_appointment_id": (next_appt or {}).get("tebra_appointment_id"),
+        "next_appointment_date": (next_appt or {}).get("date"),
+        "next_appointment_time": (next_appt or {}).get("time"),
+        "next_appointment_location": (next_appt or {}).get("location"),
+        "next_appointment_service": (next_appt or {}).get("service"),
+        "next_appointment_status": (next_appt or {}).get("status"),
+        # Full list kept for cases with multiple upcoming visits.
         "upcoming": upcoming,
     }
 
