@@ -1191,17 +1191,14 @@ async def cancel_appointment(request: Request):
         if notes:
             appt_payload["reminder_notes"] = notes
 
-        # ── Helper: Tebra cancel (Get → Update) ──
+        # ── Helper: Tebra cancel (DeleteAppointment — mirrors reschedule so the slot frees up) ──
         async def _tebra_cancel() -> str:
-            appt_data = await call_tebra_get_appointment(tebra_appt_id, rid)
-            if not appt_data:
-                return f"Could not fetch appointment {tebra_appt_id} from Tebra."
-            appt_data["AppointmentStatus"] = "Cancelled"
-            result = await call_tebra_update_appointment(appt_data, rid)
+            logger.info("[%s] Tebra cancel → DeleteAppointment tebra_id=%s", rid, tebra_appt_id)
+            result = await call_tebra_delete_appointment(tebra_appt_id, rid)
             if result["success"]:
-                logger.info("[%s] Tebra cancelled appt %s", rid, tebra_appt_id)
+                logger.info("[%s] Tebra cancelled (deleted) appt %s", rid, tebra_appt_id)
                 return "ok"
-            logger.error("[%s] Tebra cancel FAILED: %s", rid, result["error"])
+            logger.error("[%s] Tebra cancel (delete) FAILED: %s", rid, result["error"])
             return f"Tebra cancel failed: {result['error']}"
 
         # ── Helper: Lead update ──
