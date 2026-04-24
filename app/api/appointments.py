@@ -1061,8 +1061,19 @@ async def confirm_appointment(request: Request):
         if outcome == "cancelled":
             appt_payload["cancelled_at"] = datetime.utcnow().isoformat()
 
-        # ── Helper: Tebra update (Get → Update) ──
+        # ── Helper: Tebra update ──
+        # For 'cancelled' → DeleteAppointment (frees the slot in GetAppointments, mirrors reschedule/cancel).
+        # For 'confirmed' → Get → Update (status only).
         async def _tebra_update() -> str:
+            if outcome == "cancelled":
+                logger.info("[%s] Tebra cancel → DeleteAppointment tebra_id=%s", rid, tebra_appt_id)
+                result = await call_tebra_delete_appointment(tebra_appt_id, rid)
+                if result["success"]:
+                    logger.info("[%s] Tebra cancelled (deleted) appt %s", rid, tebra_appt_id)
+                    return "ok"
+                logger.error("[%s] Tebra cancel (delete) FAILED: %s", rid, result["error"])
+                return f"Tebra cancel failed: {result['error']}"
+
             appt_data = await call_tebra_get_appointment(tebra_appt_id, rid)
             if not appt_data:
                 return f"Could not fetch appointment {tebra_appt_id} from Tebra."
