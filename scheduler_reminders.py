@@ -4,11 +4,14 @@
 # Runs forever as its own container.
 # - 24hr reminders for appointments tomorrow (LA), only during office hours
 # - 2hr reminders for appointments today (LA) in a rolling time window
-# - Never call if appointment starts in < 60 minutes
+# - Never SMS if appointment starts in < 60 minutes
+# - Sends Twilio SMS (not VAPI calls) so patient can reply directly to the
+#   same number handled by the n8n SMS agent.
 # - Writes logs to /code/logs/scheduler_reminders.log
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+import base64
 import logging
 import os
 import re
@@ -25,9 +28,10 @@ LA_TZ = ZoneInfo("America/Los_Angeles")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY")
-VAPI_API_KEY = os.getenv("VAPI_API_KEY")
-VAPI_REMINDER_ASSISTANT_ID = os.getenv("VAPI_REMINDER_ASSISTANT_ID")
-VAPI_PHONE_NUMBER_ID = os.getenv("VAPI_PHONE_NUMBER_ID")
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 
 # Office hours in LA time
 OFFICE_START_HOUR = int(os.getenv("REMINDER_OFFICE_START_HOUR", "8"))   # inclusive
@@ -36,9 +40,9 @@ OFFICE_END_HOUR = int(os.getenv("REMINDER_OFFICE_END_HOUR", "17"))      # exclus
 # Never call if appointment begins too soon
 MIN_LEAD_TIME_MINUTES = int(os.getenv("REMINDER_MIN_LEAD_TIME_MINUTES", "60"))
 
-# Caps to avoid hitting Vapi concurrency
-MAX_CALLS_PER_RUN_24HR = int(os.getenv("REMINDER_24HR_MAX_CALLS_PER_RUN", "3"))
-MAX_CALLS_PER_RUN_2HR = int(os.getenv("REMINDER_2HR_MAX_CALLS_PER_RUN", "3"))
+# Caps to avoid Twilio rate spikes
+MAX_CALLS_PER_RUN_24HR = int(os.getenv("REMINDER_24HR_MAX_CALLS_PER_RUN", "10"))
+MAX_CALLS_PER_RUN_2HR = int(os.getenv("REMINDER_2HR_MAX_CALLS_PER_RUN", "10"))
 
 # Fetch size (cap calls separately)
 BATCH_SIZE = int(os.getenv("REMINDER_BATCH_SIZE", "30"))
@@ -70,8 +74,6 @@ SUPABASE_HEADERS = {
     "Content-Type": "application/json",
     "Prefer": "return=representation",
 }
-
-VAPI_HEADERS = {"Authorization": f"Bearer {VAPI_API_KEY}", "Content-Type": "application/json"}
 
 
 def now_utc() -> datetime:
@@ -180,31 +182,152 @@ async def supabase_patch(path: str, data: dict) -> bool:
         return False
 
 
-async def trigger_vapi_call(assistant_id: str, phone: str, variable_values: dict) -> dict | None:
-    e164 = format_phone(phone)
-    if not e164:
-        logger.info("trigger_vapi_call SKIP invalid phone=%r", phone)
-        return None
+def _first_name(full_name: str | None) -> str:
+    if not full_name or not str(full_name).strip():
+        return "there"
+    return str(full_name).strip().split()[0]
 
-    payload = {
-        "assistantId": assistant_id,
-        "phoneNumberId": VAPI_PHONE_NUMBER_ID,
-        "customer": {"number": e164},
-        "assistantOverrides": {"variableValues": variable_values},
-    }
+
+def _format_time_12hr(raw_time: str | None) -> str:
+    hm = _parse_hm(raw_time or "")
+    if not hm:
+        return str(raw_time or "")
+    hh, mm = hm
+    suffix = "AM" if hh < 12 else "PM"
+    h12 = hh % 12
+    if h12 == 0:
+        h12 = 12
+    if mm == 0:
+        return f"{h12}{suffix}"
+    return f"{h12}:{mm:02d}{suffix}"
+
+
+def _format_date_human(appointment_date: str | None) -> str:
+    if not appointment_date:
+        return ""
+    try:
+        y, m, d = (int(x) for x in str(appointment_date).split("-"))
+        return datetime(y, m, d).strftime("%a, %b %d")
+    except Exception:
+        return str(appointment_date)
+
+
+def build_reminder_sms(appt: dict, reminder_type: str) -> str:
+    first = _first_name(appt.get("patient_name"))
+    service = (appt.get("service") or "appointment").strip() or "appointment"
+    location = (appt.get("location") or "").strip()
+    date_str = _format_date_human(appt.get("appointment_date"))
+    time_str = _format_time_12hr(appt.get("appointment_time"))
+
+    where = f" at our {location} location" if location else ""
+
+    if reminder_type == "2hr":
+        lead = (
+            f"Hello {first}, this is a courtesy reminder from Rausch Physical Therapy & Wellness "
+            f"regarding your {service} scheduled today at {time_str}{where}."
+        )
+    else:
+        when = f"{date_str} at {time_str}" if date_str and time_str else (date_str or time_str)
+        lead = (
+            f"Hello {first}, this is a courtesy reminder from Rausch Physical Therapy & Wellness "
+            f"regarding your {service} scheduled on {when}{where}."
+        )
+
+    tail = (
+        " Kindly reply CONFIRM to confirm your visit, RESCHEDULE to choose a different time, "
+        "or CANCEL if you are unable to attend. Thank you."
+    )
+    return (lead + tail).strip()
+
+
+async def twilio_send_sms(to_phone: str, body: str) -> tuple[bool, str | None, str | None]:
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_FROM_NUMBER:
+        return False, None, "Twilio not configured"
+
+    e164 = format_phone(to_phone)
+    if not e164:
+        return False, None, f"Invalid destination phone: {to_phone!r}"
+
+    from_e164 = format_phone(TWILIO_FROM_NUMBER) or TWILIO_FROM_NUMBER
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    auth = base64.b64encode(f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode("utf-8")).decode("utf-8")
+    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"}
+    data = {"To": e164, "From": from_e164, "Body": body}
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post("https://api.vapi.ai/call/phone", headers=VAPI_HEADERS, json=payload)
-            if r.status_code == 201:
-                call_obj = r.json()
-                logger.info("trigger_vapi_call SUCCESS vapi_call_id=%s phone=%s", call_obj.get("id"), e164)
-                return call_obj
-            logger.warning("trigger_vapi_call FAILED status=%s phone=%s body=%s", r.status_code, e164, (r.text or "")[:400])
-            return None
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(url, headers=headers, data=data)
+            if r.status_code in (200, 201):
+                sid = (r.json() or {}).get("sid")
+                logger.info("reminder_sms SUCCESS sid=%s phone=%s", sid, e164)
+                return True, sid, None
+            err = f"Twilio status={r.status_code} body={(r.text or '')[:300]}"
+            logger.warning("reminder_sms FAILED %s phone=%s", err, e164)
+            return False, None, err
     except Exception as e:
-        logger.exception("trigger_vapi_call exception phone=%s: %s", e164, e)
+        logger.exception("reminder_sms exception phone=%s: %s", e164, e)
+        return False, None, f"Twilio exception: {e}"
+
+
+async def supabase_insert(path: str, row: dict) -> bool:
+    url = f"{SUPABASE_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(url, headers=SUPABASE_HEADERS, json=row)
+            if r.status_code in (200, 201):
+                return True
+            logger.warning("supabase_insert status=%s body=%s", r.status_code, (r.text or "")[:300])
+            return False
+    except Exception as e:
+        logger.exception("supabase_insert exception: %s", e)
+        return False
+
+
+async def send_reminder_sms(appt: dict, reminder_type: str) -> dict | None:
+    """
+    Send the reminder SMS via Twilio, persist it to sms_conversations, and log
+    a notification_log row. Returns a truthy dict on success, None on failure.
+    """
+    phone = appt.get("patient_phone") or ""
+    e164 = format_phone(phone)
+    if not e164:
+        logger.info("send_reminder_sms SKIP invalid phone=%r", phone)
         return None
+
+    body = build_reminder_sms(appt, reminder_type)
+    ok, sid, err = await twilio_send_sms(e164, body)
+
+    await supabase_insert(
+        "/rest/v1/notification_log",
+        {
+            "lead_id": appt.get("lead_id"),
+            "appointment_id": appt.get("id"),
+            "notification_type": f"reminder_{reminder_type}_sms",
+            "channel": "sms",
+            "status": "sent" if ok else "failed",
+            "vapi_call_id": None,
+            "payload": {"to": e164, "twilio_sid": sid, "error": err, "body": body},
+            "sent_at": now_iso() if ok else None,
+        },
+    )
+
+    if ok:
+        await supabase_insert(
+            "/rest/v1/sms_conversations",
+            {
+                "phone_number": e164,
+                "lead_id": appt.get("lead_id"),
+                "appointment_id": appt.get("id"),
+                "practice_id": None,
+                "role": "assistant",
+                "message": body,
+                "direction": "outbound",
+                "intent": f"reminder_{reminder_type}",
+                "twilio_sid": sid,
+            },
+        )
+        return {"sid": sid}
+    return None
 
 
 async def job_reminder_24hr():
@@ -257,25 +380,9 @@ async def job_reminder_24hr():
         if not marked:
             continue
 
-        call_obj = await trigger_vapi_call(
-            assistant_id=VAPI_REMINDER_ASSISTANT_ID,
-            phone=phone,
-            variable_values={
-                "lead_id": appt.get("lead_id"),
-                "appointment_id": appt_id,
-                "tebra_appointment_id": appt.get("tebra_appointment_id"),
-                "tebra_patient_id": appt.get("tebra_patient_id"),
-                "patient_name": appt.get("patient_name") or "",
-                "patient_phone": phone,
-                "appointment_date": appt.get("appointment_date"),
-                "appointment_time": appt.get("appointment_time"),
-                "location": appt.get("location"),
-                "service": appt.get("service"),
-                "reminder_type": "24hr",
-            },
-        )
+        result = await send_reminder_sms(appt, "24hr")
 
-        if call_obj is None:
+        if result is None:
             # revert so we can try later
             await supabase_patch(f"/rest/v1/appointments?id=eq.{appt_id}", {"reminder_sent_24hr": False, "updated_at": now_iso()})
         else:
@@ -283,7 +390,7 @@ async def job_reminder_24hr():
 
         await asyncio.sleep(1)
 
-    logger.info("── job_reminder_24hr DONE started_calls=%s ──", calls_started)
+    logger.info("── job_reminder_24hr DONE sent_sms=%s ──", calls_started)
 
 
 async def job_reminder_2hr():
@@ -343,36 +450,30 @@ async def job_reminder_2hr():
         if not marked:
             continue
 
-        call_obj = await trigger_vapi_call(
-            assistant_id=VAPI_REMINDER_ASSISTANT_ID,
-            phone=phone,
-            variable_values={
-                "lead_id": appt.get("lead_id"),
-                "appointment_id": appt_id,
-                "tebra_appointment_id": appt.get("tebra_appointment_id"),
-                "tebra_patient_id": appt.get("tebra_patient_id"),
-                "patient_name": appt.get("patient_name") or "",
-                "patient_phone": phone,
-                "appointment_date": appt.get("appointment_date"),
-                "appointment_time": appt.get("appointment_time"),
-                "location": appt.get("location"),
-                "service": appt.get("service"),
-                "reminder_type": "2hr",
-            },
-        )
+        result = await send_reminder_sms(appt, "2hr")
 
-        if call_obj is None:
+        if result is None:
             await supabase_patch(f"/rest/v1/appointments?id=eq.{appt_id}", {"reminder_sent_2hr": False, "updated_at": now_iso()})
         else:
             calls_started += 1
 
         await asyncio.sleep(1)
 
-    logger.info("── job_reminder_2hr DONE started_calls=%s ──", calls_started)
+    logger.info("── job_reminder_2hr DONE sent_sms=%s ──", calls_started)
 
 
 async def main():
-    missing = [k for k in ("SUPABASE_URL", "SUPABASE_API_KEY", "VAPI_API_KEY", "VAPI_REMINDER_ASSISTANT_ID", "VAPI_PHONE_NUMBER_ID") if not os.getenv(k)]
+    missing = [
+        k
+        for k in (
+            "SUPABASE_URL",
+            "SUPABASE_API_KEY",
+            "TWILIO_ACCOUNT_SID",
+            "TWILIO_AUTH_TOKEN",
+            "TWILIO_FROM_NUMBER",
+        )
+        if not os.getenv(k)
+    ]
     if missing:
         logger.error("STARTUP ERROR missing env vars: %s", missing)
         return
