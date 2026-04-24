@@ -194,10 +194,24 @@ def generate_all_slots(date_yyyy_mm_dd: str, location: str) -> list[tuple[int, i
 def parse_booked_slots(xml: str, target_date: str) -> set:
     """Parse booked slots from Tebra XML.
     Tebra returns times in CLINIC LOCAL time (PDT/PST), NOT UTC.
-    Only includes slots whose date matches target_date (YYYY-MM-DD)."""
+    Only includes slots whose date matches target_date (YYYY-MM-DD).
+    Skips appointments with ConfirmationStatus=Cancelled so cancelled
+    slots are treated as free in availability checks."""
     booked = set()
-    for raw in re.findall(r'<StartDate>([^<]+)</StartDate>', xml):
-        raw = raw.strip()
+    # Iterate per-appointment blocks so we can inspect ConfirmationStatus.
+    # Fall back to loose StartDate scan only if no blocks are present.
+    blocks = re.findall(r'<AppointmentData>(.*?)</AppointmentData>', xml, re.DOTALL)
+    if not blocks:
+        blocks = [xml]
+    for block in blocks:
+        status_m = re.search(r'<ConfirmationStatus>([^<]*)</ConfirmationStatus>', block)
+        status = (status_m.group(1).strip().lower() if status_m else "")
+        if status == "cancelled":
+            continue
+        sd_m = re.search(r'<StartDate>([^<]+)</StartDate>', block)
+        if not sd_m:
+            continue
+        raw = sd_m.group(1).strip()
         try:
             local_dt = None
             if " " in raw and "/" in raw:

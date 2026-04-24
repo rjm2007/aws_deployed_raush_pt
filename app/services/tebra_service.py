@@ -34,6 +34,7 @@ async def call_tebra_get_appointments(date: str, tebra_location_name: str) -> st
           <sch:AppointmentReason1>true</sch:AppointmentReason1>
           <sch:PatientFullName>true</sch:PatientFullName>
           <sch:ID>true</sch:ID>
+          <sch:ConfirmationStatus>true</sch:ConfirmationStatus>
         </sch:Fields>
         <sch:Filter>
           <sch:StartDate>{date}T00:00:00</sch:StartDate>

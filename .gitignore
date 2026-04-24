@@ -81,3 +81,6 @@ prompt/
 
 # Ignore sms-agent-module
 sms-agent-module/
+
+# Ignore tebra-docs
+tebra-docs/
