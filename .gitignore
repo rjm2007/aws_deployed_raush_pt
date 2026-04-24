@@ -78,3 +78,6 @@ db_commands.md
 
 # Local-only prompt drafts (not committed)
 prompt/
+
+# Ignore sms-agent-module
+sms-agent-module/
