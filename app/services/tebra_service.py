@@ -23,6 +23,7 @@ async def call_tebra_get_appointments(date: str, tebra_location_name: str) -> st
     <sch:GetAppointments>
       <sch:request>
         <sch:RequestHeader>
+          <sch:ClientVersion>1</sch:ClientVersion>
           <sch:CustomerKey>{CUSTOMER_KEY}</sch:CustomerKey>
           <sch:Password>{TEBRA_PASSWORD}</sch:Password>
           <sch:User>{TEBRA_USER}</sch:User>
