@@ -38,9 +38,10 @@ async def call_tebra_get_appointments(date: str, tebra_location_name: str) -> st
           <sch:ConfirmationStatus>true</sch:ConfirmationStatus>
         </sch:Fields>
         <sch:Filter>
+          <sch:ServiceLocationName>{tebra_location_name}</sch:ServiceLocationName>
           <sch:StartDate>{date}T00:00:00</sch:StartDate>
           <sch:EndDate>{date}T23:59:59</sch:EndDate>
-          <sch:ServiceLocationName>{tebra_location_name}</sch:ServiceLocationName>
+          <sch:TimeZoneOffsetFromGMT>{TEBRA_TIMEZONE_OFFSET_FROM_GMT}</sch:TimeZoneOffsetFromGMT>
         </sch:Filter>
       </sch:request>
     </sch:GetAppointments>
