@@ -234,10 +234,14 @@ def build_reminder_sms(appt: dict, reminder_type: str) -> str:
         )
 
     tail = (
-        " Kindly reply CONFIRM to confirm your visit, RESCHEDULE to choose a different time, "
-        "or CANCEL if you are unable to attend. Thank you."
+        "Kindly reply:\n"
+        "CONFIRM - to confirm your visit\n"
+        "RESCHEDULE - to choose a different time\n"
+        "CANCEL - if you are unable to attend\n"
+        "\n"
+        "Thank you."
     )
-    return (lead + tail).strip()
+    return (lead + "\n\n" + tail).strip()
 
 
 async def twilio_send_sms(to_phone: str, body: str) -> tuple[bool, str | None, str | None]:

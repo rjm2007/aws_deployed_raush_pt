@@ -84,3 +84,7 @@ sms-agent-module/
 
 # Ignore tebra-docs
 tebra-docs/
+
+# Local-only reminder test scripts (not committed)
+scheduler_reminders_test.py
+scheduler_reminders_sms_test.py
