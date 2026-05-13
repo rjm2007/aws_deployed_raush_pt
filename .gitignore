@@ -88,3 +88,6 @@ tebra-docs/
 # Local-only reminder test scripts (not committed)
 scheduler_reminders_test.py
 scheduler_reminders_sms_test.py
+
+# Local-only system understanding (not committed)
+Understanding.md
