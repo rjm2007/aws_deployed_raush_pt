@@ -24,7 +24,10 @@ def get_location_hours(date_yyyy_mm_dd: str, location: str) -> tuple[int, int] |
 
     Times are local clinic time (America/Los_Angeles). Slots are 30-minute intervals.
 
-    Source: clinic hours image provided by user (Apr 2026).
+    Source: client VoiceFAQ (Sep 2026) for Laguna Niguel, Dana Point, Mission Viejo.
+    Dana Point and Mission Viejo open on *alternate* Saturdays (8 AM–2 PM), but we
+    don't know which ones, so Saturdays there are not bookable by the agents.
+    Fort Fitness is not in the FAQ; its hours are unchanged (Apr 2026 source).
     """
     loc = (location or "").strip()
     try:
@@ -36,17 +39,17 @@ def get_location_hours(date_yyyy_mm_dd: str, location: str) -> tuple[int, int] |
     if weekday == 6:
         return None
 
-    # Laguna Niguel
+    # Laguna Niguel — every Saturday 8 AM–2 PM
     if loc == "Laguna Niguel":
         if weekday <= 4:
             return (_minutes(7, 0), _minutes(19, 0))
-        return (_minutes(7, 0), _minutes(13, 30))
+        return (_minutes(8, 0), _minutes(14, 0))
 
-    # Dana Point
+    # Dana Point — alternate Saturdays only (not bookable, see docstring)
     if loc == "Dana Point":
         if weekday <= 4:
             return (_minutes(7, 0), _minutes(19, 0))
-        return (_minutes(7, 0), _minutes(13, 30))
+        return None
 
     # Mission Viejo
     if loc == "Mission Viejo":

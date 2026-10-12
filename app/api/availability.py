@@ -18,6 +18,7 @@ from app.utils.time_utils import (
     format_12hr,
     get_nearest_available_slots,
     format_location_hours,
+    get_location_hours,
 )
 from app.utils.parser import build_vapi_response
 
@@ -79,6 +80,18 @@ async def check_availability(request: Request):
                 f"Sorry, {date} is a Sunday and the clinic is closed. "
                 f"We are open Monday through Saturday. Would you like to check another date?"
             )
+
+        # ── Location closed that day (e.g. Dana Point / Mission Viejo alternate Saturdays) ──
+        if get_location_hours(date, location) is None:
+            logger.info("[%s] check-availability BLOCKED — %s closed on %s", rid, location, date)
+            if requested_date.weekday() == 5:
+                msg = (
+                    f"{location} is only open on alternate Saturdays, so I can't book that Saturday here. "
+                    f"Laguna Niguel is open every Saturday from 8 AM to 2 PM, or I can check a weekday at {location}."
+                )
+            else:
+                msg = f"Sorry, {location} is closed on {date}. Would you like to check another date?"
+            return build_vapi_response(tool_call_id, msg)
 
         xml_response = await call_tebra_get_appointments(date, tebra_name)
 

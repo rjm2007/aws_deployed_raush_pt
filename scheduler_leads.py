@@ -24,6 +24,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
+from app.utils.names import clean_person_name
+
 load_dotenv()
 
 LA_TZ = ZoneInfo("America/Los_Angeles")
@@ -313,12 +315,16 @@ async def job_call_new_leads():
             continue
 
         logger.info("Calling lead_id=%s name=%r phone=%s", lead_id, full_name, e164)
+        # Spoken names drop test labels ("Kris Jorge Test 4" -> "Kris"); booking keeps the raw name.
+        spoken_full, spoken_first = clean_person_name(full_name)
         call_obj = await trigger_vapi_call(
             assistant_id=VAPI_OUTBOUND_LEAD_ASSISTANT_ID,
             phone=phone,
             variable_values={
                 "lead_id": lead_id,
-                "patient_name": full_name,
+                "patient_name": spoken_full or full_name,
+                "patient_first_name": spoken_first or "there",
+                "booking_name": full_name,
                 "patient_phone": phone,
                 "service": service,
                 "location": location,

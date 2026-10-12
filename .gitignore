@@ -91,3 +91,5 @@ scheduler_reminders_sms_test.py
 
 # Local-only system understanding (not committed)
 Understanding.md
+# MCP config (contains Vapi API key)
+.mcp.json

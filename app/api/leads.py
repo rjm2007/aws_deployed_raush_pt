@@ -35,6 +35,7 @@ from app.utils.parser import (
     vapi_response_content,
 )
 from app.services.twilio_service import twilio_send_sms
+from app.utils.names import clean_person_name
 
 router = APIRouter(tags=["Leads"])
 
@@ -429,33 +430,63 @@ async def inbound_caller_lookup(request: Request):
         candidate_names.append(name.strip())
 
     found = bool(leads) or bool(upcoming)
-    multiple = len(candidate_names) > 1
+    # Different people = different spoken first names. Repeat leads for one person
+    # ("Kris Jorge", "Kris Jorge Test 3") count as one caller → use the most recent lead.
+    distinct_first_names: list[str] = []
+    for n in candidate_names:
+        fn = clean_person_name(n)[1]
+        if fn and fn.lower() not in [x.lower() for x in distinct_first_names]:
+            distinct_first_names.append(fn)
+    multiple = len(distinct_first_names) > 1
     primary_lead = leads[0] if leads else None
     full_name = (primary_lead or {}).get("full_name") or (upcoming[0]["patient_name"] if upcoming else None)
-    first_name = (full_name or "").strip().split()[0] if full_name else None
+    first_name = clean_person_name(full_name)[1] or None
     next_appt = upcoming[0] if upcoming else None
+
+    # Did we reach out to this lead recently (text/call)? Lets the agent explain a "missed call".
+    recent_outreach = False
+    if primary_lead and primary_lead.get("updated_at"):
+        try:
+            updated = datetime.fromisoformat(str(primary_lead["updated_at"]).replace("Z", "+00:00"))
+            recent_outreach = datetime.now(updated.tzinfo) - updated <= timedelta(days=14)
+        except ValueError:
+            pass
+    lead_service = (primary_lead or {}).get("service_of_interest")
+    lead_location = (primary_lead or {}).get("preferred_location")
 
     if not found:
         message = "No record found for this phone number. Greet generically and collect details."
     elif multiple:
-        first_names = [n.split()[0] for n in candidate_names]
+        first_names = distinct_first_names
         if len(first_names) == 2:
             names_phrase = f"{first_names[0]} or {first_names[1]}"
         else:
             names_phrase = ", ".join(first_names[:-1]) + f", or {first_names[-1]}"
         message = (
-            f"{len(candidate_names)} records are linked to this phone number "
-            f"({', '.join(candidate_names)}). Ask the caller whether they are "
-            f"{names_phrase}, then continue using that person's details."
+            f"{len(first_names)} different people are linked to this phone number. "
+            f"Ask the caller whether they are {names_phrase}, then continue using that person's details."
         )
     elif next_appt:
         message = (
-            f"Returning caller {full_name or ''}.".strip()
+            f"Returning caller {first_name or ''}.".strip()
             + f" Upcoming visit on {next_appt['date']} at {next_appt['time']} "
             + f"at {next_appt.get('location') or 'the clinic'}."
         )
+    elif primary_lead:
+        parts = [f"Caller is likely {first_name or 'a known lead'}, who sent us an inquiry"]
+        if lead_service:
+            parts.append(f" about {lead_service}")
+        if lead_location:
+            parts.append(f" at our {lead_location} clinic")
+        parts.append(". No appointment booked yet.")
+        if recent_outreach:
+            parts.append(
+                " Our team texted/called this number recently about that inquiry — if they mention a missed"
+                " call or text, that was us; offer to book them now."
+            )
+        message = "".join(parts)
     else:
-        message = f"Returning caller {full_name or ''}. No upcoming appointments.".strip()
+        message = f"Returning caller {first_name or ''}. No upcoming appointments.".strip()
 
     result = {
         "found": found,
@@ -471,6 +502,7 @@ async def inbound_caller_lookup(request: Request):
         "service_of_interest": (primary_lead or {}).get("service_of_interest"),
         "preferred_location": (primary_lead or {}).get("preferred_location"),
         "tebra_patient_id": (primary_lead or {}).get("tebra_patient_id"),
+        "recent_outreach": recent_outreach,
         # Full list of leads sharing this number (use this when multiple_matches is true).
         "leads": lead_summaries,
         "has_upcoming_appointment": bool(upcoming),
