@@ -9,7 +9,7 @@
 
 from fastapi import FastAPI
 
-from app.api import availability, appointments, leads, system
+from app.api import availability, appointments, faq, leads, system
 
 app = FastAPI(
     title="Rausch PT Tebra API",
@@ -27,6 +27,7 @@ app = FastAPI(
         {"name": "Availability", "description": "Check open appointment slots in Tebra"},
         {"name": "Appointments", "description": "Create, update, reschedule, and confirm appointments"},
         {"name": "Leads",        "description": "Lead status updates and VAPI webhook"},
+        {"name": "FAQ",         "description": "Clinic FAQ lookup for voice agents (Supabase clinic_faq)"},
         {"name": "System",      "description": "Health checks and diagnostics"},
     ],
 )
@@ -34,4 +35,5 @@ app = FastAPI(
 app.include_router(availability.router,  prefix="/api/v1")
 app.include_router(appointments.router,  prefix="/api/v1")
 app.include_router(leads.router,         prefix="/api/v1")
+app.include_router(faq.router,           prefix="/api/v1")
 app.include_router(system.router,        prefix="/api/v1")

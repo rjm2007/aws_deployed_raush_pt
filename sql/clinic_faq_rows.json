@@ -1,0 +1,470 @@
+[
+ {
+  "category": "Always hand off without answering",
+  "question": "Always hand off without answering",
+  "answer": "Medical emergency: tell the caller to hang up and dial 911.\n- Symptoms, diagnosis, or whether an exercise or treatment is safe for them.\n- Billing disputes, balances, or questions about a specific bill.\n- Workers' comp, auto accident, or personal injury cases.\n- Complaints, or an upset caller who asks for a person.",
+  "follow_up": false
+ },
+ {
+  "category": "Core facts",
+  "question": "Core facts",
+  "answer": "Clinic name: Rausch PT & Wellness (also known as Rausch Physical Therapy & Sports Performance).\n- Main phone: (949) 276-5401, one number for all three locations.\n- Phone hours: Monday\u2013Friday, 7 AM\u20137 PM.\n- Locations: Laguna Niguel, Dana Point, Mission Viejo.\n- Website: rauschpt.net\n- Referral needed: No, for physical therapy or wellness services (California Direct Access).\n- Online booking: available 24/7 for PT and wellness services at rauschpt.net.",
+  "follow_up": false
+ },
+ {
+  "category": "General clinic information",
+  "question": "What kind of clinic is this?",
+  "answer": "We're Rausch PT & Wellness, a physical therapy and wellness clinic with three locations in South Orange County. We offer physical therapy, pelvic health therapy, chiropractic care, therapeutic massage, and assisted stretching, all under one roof. Our goal is to give you personalized care that gets you back to doing what you love.",
+  "follow_up": false
+ },
+ {
+  "category": "General clinic information",
+  "question": "What makes you different from other PT clinics?",
+  "answer": "You see the same physical therapy care team every visit, so your providers really get to know your body and your goals. Because massage, stretching, and chiropractic are in-house, the team works together on a plan that treats your whole body, not just the spot that hurts.",
+  "follow_up": false
+ },
+ {
+  "category": "General clinic information",
+  "question": "Who do you usually treat?",
+  "answer": "Everyone from weekend warriors to people recovering from surgery: runners, surfers, golfers, pickleball and tennis players, dancers, older adults working on balance, and anyone with aches, pains, or stiffness in daily life.",
+  "follow_up": false
+ },
+ {
+  "category": "General clinic information",
+  "question": "Do I need a doctor's referral?",
+  "answer": "No. In California you can see a physical therapist directly without a referral. The same goes for massage, stretching, and chiropractic. If your condition needs a doctor's evaluation, we'll let you know and help connect you with a trusted local physician.",
+  "follow_up": false
+ },
+ {
+  "category": "General clinic information",
+  "question": "Is this the same place as Rausch Physical Therapy and Sports Performance?",
+  "answer": "Yes. Rausch Physical Therapy & Sports Performance is our longtime name; today we go by Rausch PT & Wellness.",
+  "follow_up": false
+ },
+ {
+  "category": "General clinic information",
+  "question": "Do you have a website?",
+  "answer": "Yes, rauschpt.net. You can see the team, pricing, and accepted insurance there, and book appointments online anytime.",
+  "follow_up": false
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Where are you located?",
+  "answer": "Three locations in South Orange County: Laguna Niguel, Dana Point, and Mission Viejo. All three offer physical therapy.",
+  "follow_up": false
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Laguna Niguel address",
+  "answer": "30100 Town Center Drive, Suite Y/Z, Laguna Niguel, CA 92677. Open every Saturday morning.\nEmail: info@rauschpt.net. Fax: (949) 276-5403.",
+  "follow_up": false
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Dana Point address",
+  "answer": "24582 Del Prado Avenue, Suite C, Dana Point, CA 92629.\nEmail: infoDP@rauschpt.net. Fax: (949) 443-0721.",
+  "follow_up": false
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Mission Viejo address",
+  "answer": "24000 Alicia Parkway, Suite 27, Mission Viejo, CA 92691.\nEmail: infoMV@rauschpt.net. Fax: (949) 245-7544.",
+  "follow_up": false
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Which location is closest to me?",
+  "answer": "Ask which city or neighborhood the caller is coming from and help them pick. All three offer physical therapy, so choose whichever is easiest to get to.",
+  "follow_up": false
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Is there parking?",
+  "answer": "The front desk will give the best parking details for the location you're visiting.",
+  "follow_up": true
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Is the clinic wheelchair accessible?",
+  "answer": "The front desk will walk you through access at your location so you get accurate details.",
+  "follow_up": true
+ },
+ {
+  "category": "Locations and directions",
+  "question": "Can you send me directions?",
+  "answer": "Each location has a \"Get Directions\" link at rauschpt.net under Locations, or search \"Rausch Physical Therapy\" plus the city name in your maps app.",
+  "follow_up": false
+ },
+ {
+  "category": "Operating hours",
+  "question": "Hours by location",
+  "answer": "Laguna Niguel: Monday\u2013Friday 7 AM\u20137 PM; every Saturday 8 AM\u20132 PM.\n- Dana Point: Monday\u2013Friday 7 AM\u20137 PM; alternate Saturdays 8 AM\u20132 PM.\n- Mission Viejo: Monday\u2013Friday 7 AM\u20135 PM; alternate Saturdays 8 AM\u20132 PM.\n- Sunday: closed at all locations.\n- Phones are answered Monday\u2013Friday, 7 AM\u20137 PM, for all three locations.",
+  "follow_up": false
+ },
+ {
+  "category": "Operating hours",
+  "question": "Are you open on Saturdays?",
+  "answer": "Yes. Laguna Niguel is open every Saturday, 8 AM\u20132 PM. Dana Point and Mission Viejo are open on alternating Saturdays, same hours, so check availability when booking.",
+  "follow_up": false
+ },
+ {
+  "category": "Operating hours",
+  "question": "Is Dana Point or Mission Viejo open this Saturday?",
+  "answer": "Those two locations are open every other Saturday, 8 AM\u20132 PM. The front desk can confirm whether this Saturday is one of them. For a guaranteed Saturday, Laguna Niguel is open every week.",
+  "follow_up": true
+ },
+ {
+  "category": "Operating hours",
+  "question": "Are you open on Sundays?",
+  "answer": "Closed on Sundays at all locations. You can still book online anytime at rauschpt.net, or call back Monday starting at 7 AM.",
+  "follow_up": false
+ },
+ {
+  "category": "Operating hours",
+  "question": "How early can I come in before work?",
+  "answer": "All three clinics open at 7 AM on weekdays. Laguna Niguel and Dana Point also have evening appointments until 7 PM.",
+  "follow_up": false
+ },
+ {
+  "category": "Operating hours",
+  "question": "Are you open on holidays?",
+  "answer": "Hours can change around holidays. The front desk will confirm the schedule for the date you have in mind.",
+  "follow_up": true
+ },
+ {
+  "category": "Operating hours",
+  "question": "How do I reach someone after hours?",
+  "answer": "Phones are answered Monday\u2013Friday, 7 AM\u20137 PM. Outside those hours, book or request an appointment online at rauschpt.net, or email the location you visit and the team will get back to you. For a medical emergency, hang up and call 911.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Physical therapists \u2014 Laguna Niguel",
+  "answer": "Dr. Danielle S. \u2014 Clinical Director, Pelvic Health & Orthopedic Specialist \u2014 pelvic health, orthopedics, active adults.\n- Dr. Emily R. \u2014 Physical Therapist, Pelvic Health Specialist \u2014 dancers; knee, ankle, and hip injuries; pelvic health.\n- Dr. Daniel C. \u2014 Physical Therapist \u2014 sports, active adults and athletes.\n- Christina K. \u2014 Physical Therapist \u2014 low back and lower-body conditions.\n- Dr. Austin M. \u2014 Physical Therapist \u2014 hip, ankle, post-surgery rehab.\n- Dr. Peyton L. \u2014 Physical Therapist \u2014 balance, dizziness (vestibular), jaw (TMJ).\n- Dr. Chloe R. \u2014 Physical Therapist, Pelvic Health Specialist \u2014 women's pelvic health, pregnancy and postpartum, dancers.\n- Dr. Sarah Y. \u2014 Physical Therapist \u2014 shoulder, arm, and hand; sports injuries.\n- Kevin T. \u2014 Chief Operations Officer, Physical Therapist \u2014 25+ years of general orthopedic care.\n- Dr. Bailey A. \u2014 Physical Therapist \u2014 neurological and balance, surf injuries, neck.\n- Dr. Byron S. \u2014 Physical Therapist (bilingual) \u2014 older adults, soccer players, cyclists.\n- Dr. Prajna A. \u2014 Physical Therapist \u2014 orthopedic, post-surgery, sports (11+ years).\n- Ryan H. \u2014 Physical Therapist Assistant \u2014 orthopedic, neurological, workers' comp.\n- Abby A. \u2014 Physical Therapist Assistant, Pelvic Health Specialist \u2014 pelvic floor, Pilates.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Physical therapists \u2014 Dana Point",
+  "answer": "Dr. Nick T. \u2014 Group Director, Physical Therapist \u2014 surfers, runners, concussion rehab.\n- Dr. Clay S. \u2014 Assistant Clinical Director, Physical Therapist \u2014 hands-on (manual) therapy, surfers, active adults.\n- Dr. Ryan T. \u2014 Physical Therapist (also StretchFix) \u2014 neck and shoulder, surfers, children with disabilities.\n- Dr. Andrew L. \u2014 Physical Therapist \u2014 volleyball athletes, surfers.\n- Dr. Jordan R. \u2014 Physical Therapist \u2014 orthopedic, neurological, sports, pediatric.\n- Kathryn T. \u2014 Physical Therapist Assistant, Pelvic Health Specialist \u2014 orthopedic, Pilates, dancers (also sees patients in Mission Viejo).",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Physical therapists \u2014 Mission Viejo",
+  "answer": "Dr. Sarah T. \u2014 Clinical Director, Physical Therapist \u2014 orthopedic and sports, active adults.\n- Dr. Analise R. \u2014 Physical Therapist, Pelvic Health Specialist \u2014 pelvic floor, runners and active adults.\n- Joelle S. \u2014 Physical Therapist \u2014 orthopedic, 30+ years of experience.\n- Kathryn T. \u2014 Physical Therapist Assistant, Pelvic Health Specialist \u2014 orthopedic, Pilates, dancers.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Wellness providers",
+  "answer": "Chiropractors (Laguna Niguel and Dana Point): Dr. Peter S. and Dr. Bill Cowdrey (Certified Chiropractic Sports Physician).\n- Massage therapists: Rolan F. (Director of Health & Wellness), Roni M., Melody D., My T., Natalie C., Rook, Marc V., Irina E., Meagen J., Faviola, Alina, Jeff.\n- StretchFix specialists (\"Stretch Fixologists\"): Reagan, Jorge P., Brisa, Alexis M., Ethan, Anthony, Rachel V., Jeff, Dr. Ryan T.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Leadership",
+  "answer": "Kevin R. (President, Owner, and Founder), Kevin T. (COO), Jessica Rojas (Regional Manager).",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Who will be treating me?",
+  "answer": "Your care is led by a licensed physical therapist, and you see the same physical therapy care team every visit.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Can I request a specific therapist?",
+  "answer": "Absolutely. Tell us who you'd like to see and we'll check which location they work at. If you're not sure, describe what's going on and we can suggest someone whose focus fits.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Pelvic floor / pelvic health specialists",
+  "answer": "Several pelvic health specialists; pelvic health therapy is available to all genders. Laguna Niguel: Dr. Danielle, Dr. Emily, Dr. Chloe, and Abby. Mission Viejo: Dr. Analise. Kathryn sees patients in both Dana Point and Mission Viejo.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Therapist for surfers, runners, dancers, golfers, athletes",
+  "answer": "Surfers: Dr. Nick, Dr. Clay, Dr. Andrew, and Dr. Ryan in Dana Point, and Dr. Bailey in Laguna Niguel. Dancers: Dr. Emily and Dr. Chloe in Laguna Niguel. Happy to help match any other sport.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Therapist for dizziness or balance problems",
+  "answer": "Dr. Peyton and Dr. Bailey in Laguna Niguel focus on balance and dizziness. Dr. Peyton also treats jaw (TMJ) problems.",
+  "follow_up": false
+ },
+ {
+  "category": "Our team",
+  "question": "Does anyone speak Spanish or another language?",
+  "answer": "Some team members are bilingual. The front desk will match you with the right provider.",
+  "follow_up": true
+ },
+ {
+  "category": "Our team",
+  "question": "I used to see a provider who is not listed. Can I book with them?",
+  "answer": "The front desk can check that provider's current schedule or help find the best fit on the team.",
+  "follow_up": true
+ },
+ {
+  "category": "Services offered",
+  "question": "Services and session lengths",
+  "answer": "Physical therapy \u2014 hands-on treatment and targeted exercise to find and fix the root cause of pain \u2014 about 60 minutes.\n- Premium physical therapy \u2014 extended one-on-one time with your physical therapist \u2014 45 or 60 minutes.\n- Pelvic health therapy \u2014 pelvic floor treatment for all genders, including pregnancy and postpartum \u2014 60 minutes.\n- Rx Chiro \u2014 chiropractic care starting with a full neurological evaluation \u2014 10 to 60 minutes.\n- Rx Massage \u2014 therapeutic massage for recovery and injury prevention \u2014 50 or 80 minutes.\n- StretchFix \u2014 assisted stretching designed by Doctors of Physical Therapy \u2014 25 or 50 minutes.\n- Rx Wellness Membership \u2014 monthly plans for massage and StretchFix, with member discounts.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "What do you treat?",
+  "answer": "Most aches, pains, sprains, and movement problems: back and neck pain, sports injuries, recovery after surgery, joint pain, balance and dizziness, jaw pain, concussion recovery, and pelvic floor concerns.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "Do you do rehab after surgery?",
+  "answer": "Yes, before and after surgery, such as knee, hip, and shoulder procedures. The therapist builds a plan around your surgeon's guidelines and your goals.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "What happens in a physical therapy session?",
+  "answer": "Your therapist looks at how your whole body moves to find the root cause of your symptoms. Sessions combine hands-on treatment with guided exercises, and the plan is adjusted as you improve.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "What is Premium physical therapy?",
+  "answer": "45 or 60 minutes of dedicated one-on-one time with your physical therapist. Great if you want extra hands-on care, are recovering from surgery, or want to get back to your sport faster. You can use insurance to cover part of the cost or pay out of pocket.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "What is pelvic floor therapy?",
+  "answer": "Helps with issues like pelvic pain, core weakness, and concerns during pregnancy or after giving birth, among many others. Available to all genders; sessions are private, one-on-one, and about 60 minutes.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "Do you have a chiropractor?",
+  "answer": "Yes. Rx Chiro includes adjustments, hands-on soft tissue work, and corrective exercises. Every new chiropractic client starts with a 45-minute full-body evaluation before booking other chiro visits.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "Do you offer massage?",
+  "answer": "Yes. Rx Massage offers 50- and 80-minute therapeutic sessions personalized with targeted techniques. Great for recovery, injury prevention, or helping your body feel better.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "What is StretchFix?",
+  "answer": "Assisted stretching program designed by Doctors of Physical Therapy. A trained specialist stretches you through personalized routines to improve flexibility and mobility. Sessions are 25 or 50 minutes.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "What is the Rx Wellness Membership?",
+  "answer": "A monthly plan for massage or StretchFix. Ground: $87 a month for one 50-minute session. Evolve: $163 a month for two. Elevate: $347 a month for three, plus two 30-minute add-ons and 10 laser sessions. All plans include discounts on additional wellness services.",
+  "follow_up": false
+ },
+ {
+  "category": "Services offered",
+  "question": "How do I cancel my membership?",
+  "answer": "Membership cancellations need 30 days' notice, using the cancellation form on the Rx Wellness Membership page. Once filled out, email it to info@rauschpt.net.",
+  "follow_up": true
+ },
+ {
+  "category": "Services offered",
+  "question": "Do you treat kids?",
+  "answer": "Some therapists work with children. The front desk will confirm the right provider and location for your child.",
+  "follow_up": true
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "How do I make an appointment?",
+  "answer": "The agent can help schedule right now. You can also book physical therapy or wellness services online anytime at rauschpt.net.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "I'm a new patient. How do I get started?",
+  "answer": "For physical therapy, you start with an initial evaluation, where your therapist learns about your injury and goals and builds your treatment plan. No referral needed.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "I'm a returning patient. How do I book my next visit?",
+  "answer": "Book with the agent now, online at rauschpt.net, or with the front desk at the end of your appointment.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "Can I get in today?",
+  "answer": "We'll do our best to get you in as soon as possible. You can also see live availability online at rauschpt.net.",
+  "follow_up": true
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "How do I cancel or reschedule? (cancellation policy)",
+  "answer": "Physical therapy: let us know by 2 PM the business day before your visit (for a Monday appointment, by 2 PM Friday). Massage, StretchFix, and chiropractic: at least 24 hours' notice.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "Is there a fee if I cancel late or miss my appointment?",
+  "answer": "Yes. Physical therapy late cancellation or no-show: $55 for a standard session, $110 for a premium session. Massage, StretchFix, and chiropractic: changes within 24 hours are charged the full appointment fee.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "How long is each appointment?",
+  "answer": "Physical therapy about 60 minutes; Premium PT 45 or 60 minutes; massage 50 or 80 minutes; StretchFix 25 or 50 minutes; chiropractic 10 to 60 minutes depending on the type.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "How often will I need to come in?",
+  "answer": "Depends on your personal treatment plan. After your first visit, your therapist recommends how often to come in and gives an estimated timeline, which can change as you improve.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "How long will I need physical therapy?",
+  "answer": "Depends on your condition, goals, and how your body responds. Your therapist gives an estimated timeline at your first visit and adjusts it as you progress.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "Can I book a massage or StretchFix while doing PT?",
+  "answer": "Yes, many patients do. Wellness providers and physical therapists work together, so these services can support your recovery. Book online anytime at rauschpt.net.",
+  "follow_up": false
+ },
+ {
+  "category": "Appointments and booking",
+  "question": "Do I need a chiropractic evaluation first?",
+  "answer": "Yes. New chiropractic clients start with a 45-minute full-body evaluation, including a neurological exam, diagnosis, and a first treatment. After that you can book follow-up, advanced, or quick maintenance visits.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Accepted insurance plans (all three locations)",
+  "answer": "PPO (no referral needed): Blue Cross, Blue Shield, UnitedHealthcare, Cigna, Aetna, Medicare, AARP, UMR, Tricare, Humana, MultiPlan, PHCS.\n- HMO (medical group must be MemorialCare): Blue Cross, Blue Shield, UnitedHealthcare, Cigna, Aetna, Medicare, AARP, UMR, Tricare, SCAN, Health Net.\n- Workers' comp carriers: One Call, MedRisk, Sedgwick, CorVel, Homelink, CiQ.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Do you take my insurance?",
+  "answer": "We accept most major plans, including Blue Cross, Blue Shield, UnitedHealthcare, Cigna, Aetna, Medicare, AARP, UMR, Tricare, Humana, MultiPlan, and PHCS. If a plan is not on the list, the front desk is happy to check.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "I have an HMO. Can I come to you?",
+  "answer": "Yes, with several HMO plans, as long as your medical group is MemorialCare. The medical group is usually printed on your insurance card, and the front desk can help confirm.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Cash-pay prices (self-pay rates)",
+  "answer": "PT initial evaluation or premium session, 60 min: $197.\n- Premium PT session, 45 min: $157.\n- PT follow-up session, 30 min: $107.\n- Pelvic health session, 60 min: $249.\n- Rx Massage: 50 min $107; 80 min $137.\n- StretchFix: 25 min $63; 50 min $107.\n- StretchFix 3-pack: 3 \u00d7 25 min $105; 3 \u00d7 50 min $197.\n- Chiro full-body evaluation, 45 min: $153.\n- Chiro advanced treatment, 60 min: $197.\n- Chiro follow-up, 30 min: $97.\n- Chiro maintenance visit, 10 min: $43.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Will my insurance cover all of it? What will I owe?",
+  "answer": "Most plans cover physical therapy, though you may have a co-pay at each visit. The front desk can review your benefits before your first appointment, or you can call the number on the back of your insurance card.",
+  "follow_up": true
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Do you take Medi-Cal or Kaiser?",
+  "answer": "The front desk will check your specific plan and go over your options.",
+  "follow_up": true
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "What if I don't have insurance?",
+  "answer": "No problem. Straightforward cash-pay rates, for example a physical therapy evaluation is $197 and a 30-minute follow-up is $107.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Can I use insurance for massage or StretchFix?",
+  "answer": "Depends on your plan. Some plans may help cover these; if not, pay out of pocket at standard rates or save with a package or membership.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Does insurance cover chiropractic?",
+  "answer": "Chiropractic visits are cash-pay. At the end of each visit you get a detailed receipt called a superbill, which you can send to your insurance for possible reimbursement depending on your plan.",
+  "follow_up": false
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Workers' comp or car accident case",
+  "answer": "We work with several workers' comp carriers. These cases need a few extra details, so the front desk will set everything up correctly.",
+  "follow_up": true
+ },
+ {
+  "category": "Insurance and payment",
+  "question": "Question about my bill",
+  "answer": "The team will look at your account and help.",
+  "follow_up": true
+ },
+ {
+  "category": "What to expect",
+  "question": "What should I bring to my first visit?",
+  "answer": "Photo ID, insurance card, and any referral or authorization paperwork your insurance requires. Also helpful: related medical records (X-rays, MRI reports, surgery notes) and a list of current medications.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "What should I wear?",
+  "answer": "Comfortable clothes that let you move easily and let your therapist reach the area being treated, for example shorts for a knee or a tank top for a shoulder. Athletic shoes are a good idea.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "What happens at the first appointment?",
+  "answer": "Your therapist talks with you about your injury and goals, then does a thorough exam (which can include how you walk and move), explains what they found and their plan. You usually start treatment and exercises the same day.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "How long is the first visit?",
+  "answer": "About 60 minutes: evaluation, explaining your plan, and your first treatment.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "Will I get exercises to do at home?",
+  "answer": "Yes. You get a personalized home exercise program through an app called Limber Health.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "Should I arrive early?",
+  "answer": "Arriving a few minutes early on your first visit is a good idea so you can check in without feeling rushed.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "Anything else I should prepare?",
+  "answer": "Jot down questions or goals (like getting back to a sport or sleeping without pain). A water bottle and a notebook or phone for exercise notes are handy.",
+  "follow_up": false
+ },
+ {
+  "category": "What to expect",
+  "question": "Will it hurt?",
+  "answer": "Our goal is to help you feel better; your therapist works within your comfort level and checks in as you go. For your specific situation, the team will follow up.",
+  "follow_up": true
+ },
+ {
+  "category": "What to expect",
+  "question": "I'm in a lot of pain right now. What should I do?",
+  "answer": "If this is a medical emergency, hang up and call 911. Otherwise the team will follow up to find you the soonest appointment.",
+  "follow_up": true
+ }
+]
