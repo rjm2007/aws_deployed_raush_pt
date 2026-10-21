@@ -20,10 +20,11 @@ any please tell know want like just get okay ok hi hey so if from""".split())
 # Spoken words → FAQ vocabulary
 _SYNONYMS = {
     "insurance": "insurance plan plans ppo hmo medicare coverage accepted",
+    "kaiser": "insurance hmo plan accepted", "aetna": "insurance accepted", "medicare": "insurance accepted",
     "cost": "price prices cash pay self-pay rates", "price": "price prices cash pay self-pay rates",
     "much": "price prices cash rates", "pay": "price cash payment self-pay",
     "open": "hours open saturday", "close": "hours", "hours": "hours open",
-    "saturday": "saturday saturdays hours", "sunday": "sunday sundays",
+    "saturday": "saturday saturdays hours", "sunday": "sunday sundays hours location",
     "address": "address located location directions", "where": "located address location",
     "directions": "directions address", "parking": "parking",
     "therapist": "therapist therapists team provider physical", "doctor": "therapist team provider dr",
