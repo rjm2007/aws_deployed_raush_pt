@@ -36,6 +36,7 @@ from app.utils.parser import (
 )
 from app.services.twilio_service import twilio_send_sms
 from app.utils.names import clean_person_name
+from app.utils.time_utils import callback_time_to_utc_iso
 
 router = APIRouter(tags=["Leads"])
 
@@ -593,13 +594,46 @@ async def update_lead_status(request: Request):
                 )
             current_lead = r.json()[0]
 
-        # ── Idempotency: skip duplicate update if already in terminal state ──
+        # ── Callback time: a naive value is clinic (LA) wall time, never UTC ──
+        if callback_requested_at:
+            cb_utc = callback_time_to_utc_iso(callback_requested_at)
+            if cb_utc:
+                logger.info("[%s] update-lead-status callback %s -> %s (UTC)", rid, callback_requested_at, cb_utc)
+                callback_requested_at = cb_utc
+            else:
+                logger.warning("[%s] update-lead-status unparseable callback time %r — kept in callback_notes",
+                               rid, callback_requested_at)
+                callback_notes = f"{callback_notes or ''} (requested time: {callback_requested_at})".strip()
+                callback_requested_at = None
+
+        # ── Idempotency: same terminal status again → don't re-count the attempt or change status,
+        #    but still save the call details (callback time / notes), so a repeat call never loses them ──
         current_qs = current_lead.get("queue_status")
         if current_qs in ("complete", "not_interested", "follow_up", "manual_follow_up") and current_qs == queue_status:
-            logger.info("[%s] update-lead-status SKIP duplicate — lead already %s", rid, current_qs)
+            detail_data: dict = {}
+            if callback_requested_at:
+                detail_data["callback_requested_at"] = callback_requested_at
+            if callback_notes:
+                detail_data["callback_notes"] = callback_notes
+            if tebra_patient_id:
+                detail_data["tebra_patient_id"] = tebra_patient_id
+            if notes:
+                detail_data["notes"] = notes
+            if not detail_data:
+                logger.info("[%s] update-lead-status SKIP duplicate — lead already %s", rid, current_qs)
+                return build_vapi_response(
+                    tool_call_id,
+                    f"Lead already updated. Status: {current_qs}, Outcome: {current_lead.get('lead_outcome', 'unchanged')}."
+                )
+            detail_data["updated_at"] = datetime.utcnow().isoformat()
+            ok = await supabase_update_lead(lead_id, detail_data)
+            logger.info("[%s] update-lead-status same status %s — saved details only fields=%s ok=%s",
+                        rid, current_qs, sorted(k for k in detail_data if k != "updated_at"), ok)
+            if not ok:
+                return build_vapi_response(tool_call_id, "Failed to update lead record. Please check logs.")
             return build_vapi_response(
                 tool_call_id,
-                f"Lead already updated. Status: {current_qs}, Outcome: {current_lead.get('lead_outcome', 'unchanged')}."
+                f"Lead updated successfully. Status: {current_qs}, Outcome: {current_lead.get('lead_outcome') or 'unchanged'}."
             )
 
         # ── Build update payload (only include non-null fields) ──
@@ -876,7 +910,7 @@ async def vapi_webhook(request: Request):
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(
                 f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
-                f"&select=id,queue_status,lead_outcome,call_attempts",
+                f"&select=id,queue_status,lead_outcome,call_attempts,notes",
                 headers=SUPABASE_HEADERS,
             )
             if r.status_code != 200 or not r.json():
@@ -890,6 +924,21 @@ async def vapi_webhook(request: Request):
         # Determine call_type based on which assistant handled the call
         call_type_log = "outbound_reminder" if assistant_id == VAPI_REMINDER_ASSISTANT_ID else "outbound_new_lead"
 
+        # Voicemail (Vapi audio detection spoke voicemailMessage and hung up, so the agent never ran
+        # update_lead_status): make sure the lead says so. Status is left as is for follow-up leads.
+        is_voicemail = ended_reason == "voicemail"
+        vm_note = "Reached voicemail; left callback message (end-of-call)"
+        if is_voicemail and current_qs in ("follow_up", "manual_follow_up"):
+            old_notes = (lead.get("notes") or "").strip()
+            if "voicemail" not in old_notes.lower():
+                ok = await supabase_update_lead(lead_id, {
+                    "notes": f"{old_notes} | {vm_note}" if old_notes else vm_note,
+                    "last_called_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+                logger.info("[%s] vapi-webhook voicemail note saved lead_id=%s status=%s ok=%s",
+                            rid, lead_id, current_qs, ok)
+
         # If already in a terminal state, just log the call
         if current_qs in ("complete", "not_interested", "follow_up", "manual_follow_up"):
             logger.info("[%s] vapi-webhook — lead already %s, inserting call_log only", rid, current_qs)
@@ -901,8 +950,8 @@ async def vapi_webhook(request: Request):
                 duration_seconds=duration_seconds,
                 call_type=call_type_log,
                 call_direction="outbound",
-                outcome=current_outcome or ended_reason,
-                notes=summary if summary else None,
+                outcome="voicemail" if is_voicemail else (current_outcome or ended_reason),
+                notes=summary if summary else (vm_note if is_voicemail else None),
             )
             return JSONResponse(content={"ok": True})
 
@@ -920,13 +969,14 @@ async def vapi_webhook(request: Request):
             queue_status = "in_progress" if new_attempts < 3 else "manual_follow_up"
             lead_outcome = "no_answer"
 
+        fallback_note = f"[auto-fallback] {vm_note}" if is_voicemail else f"[auto-fallback] {ended_reason}"
         update_data = {
             "queue_status":   queue_status,
             "lead_outcome":   lead_outcome,
             "call_attempts":  new_attempts,
             "last_called_at": datetime.utcnow().isoformat(),
             "updated_at":     datetime.utcnow().isoformat(),
-            "notes": f"[auto-fallback] {ended_reason}. {summary}" if summary else f"[auto-fallback] {ended_reason}",
+            "notes": f"{fallback_note}. {summary}" if summary else fallback_note,
         }
 
         success = await supabase_update_lead(lead_id, update_data)
@@ -941,8 +991,8 @@ async def vapi_webhook(request: Request):
             duration_seconds=duration_seconds,
             call_type=call_type_log,
             call_direction="outbound",
-            outcome=lead_outcome,
-            notes=summary if summary else f"[auto-fallback] {ended_reason}",
+            outcome="voicemail" if is_voicemail else lead_outcome,
+            notes=summary if summary else fallback_note,
         )
 
         return JSONResponse(content={"ok": True})

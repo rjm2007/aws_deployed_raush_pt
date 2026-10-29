@@ -21,6 +21,26 @@ def la_to_utc(date_yyyy_mm_dd: str, h: int, mn: int) -> datetime:
     return local_dt.astimezone(timezone.utc)
 
 
+def callback_time_to_utc_iso(raw: str | None) -> str | None:
+    """
+    Agent callback time -> UTC ISO string for the timestamptz column.
+    A naive value ("2026-10-31T15:00:00", "2026-10-31 15:00") is clinic wall time (LA), not UTC.
+    A value with Z / an offset is kept as that instant. Unparseable -> None (caller keeps the raw text).
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CLINIC_TZ)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def clinic_utc_offset_hours(date_yyyy_mm_dd: str | None = None) -> int:
     """
     Clinic offset from GMT in whole hours for that date (-7 in PDT, -8 in PST).
