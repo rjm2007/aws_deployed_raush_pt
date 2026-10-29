@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
@@ -19,6 +19,8 @@ from app.utils.time_utils import (
     get_nearest_available_slots,
     format_location_hours,
     get_location_hours,
+    closed_day_reason,
+    now_la,
 )
 from app.utils.parser import build_vapi_response
 
@@ -71,6 +73,15 @@ async def check_availability(request: Request):
             logger.warning("[%s] check-availability invalid date format: %s", rid, date)
             return build_vapi_response(tool_call_id, message)
 
+        # ── Block past dates and holidays ──
+        reason = closed_day_reason(date)
+        if reason == "past":
+            logger.info("[%s] check-availability BLOCKED — %s is in the past", rid, date)
+            return build_vapi_response(tool_call_id, f"{date} has already passed. Ask the patient for a day from today onward.")
+        if reason:
+            logger.info("[%s] check-availability BLOCKED — %s is %s", rid, date, reason)
+            return build_vapi_response(tool_call_id, f"The clinic is closed on {reason} ({date}). Would you like to check another date?")
+
         # ── Block Sundays — clinic is closed ──
         requested_date = datetime.strptime(date, "%Y-%m-%d")
         if requested_date.weekday() == 6:  # Sunday
@@ -108,12 +119,12 @@ async def check_availability(request: Request):
         booked    = parse_booked_slots(xml_response, date)
         available = get_available_slots(booked, date, location)
 
-        # ── Filter out past slots when date is today (PDT) ──
-        pdt_now = datetime.now(timezone(timedelta(hours=-7)))
-        if date == pdt_now.strftime("%Y-%m-%d"):
+        # ── Filter out past slots when date is today (clinic time, DST-aware) ──
+        la_now = now_la()
+        if date == la_now.strftime("%Y-%m-%d"):
             available = [
                 (h, mn) for (h, mn) in available
-                if (h * 60 + mn) > (pdt_now.hour * 60 + pdt_now.minute)
+                if (h * 60 + mn) > (la_now.hour * 60 + la_now.minute)
             ]
 
         requested_time = parse_time_to_24hr(time_str) if time_str else None
@@ -124,8 +135,9 @@ async def check_availability(request: Request):
             else:
                 ranges_str = ", then ".join(get_free_ranges(available))
                 message = (
-                    f"Available slots on {date} at {location}: {ranges_str} "
-                    f"— all in 30-minute intervals."
+                    f"Available start times on {date} at {location}: {ranges_str}. "
+                    f"A range means every 30 minutes from the first to the last time listed; a single time is one slot only. "
+                    f"Offer only these exact times — the last time listed is the last slot of the day."
                 )
         else:
             h, mn = requested_time

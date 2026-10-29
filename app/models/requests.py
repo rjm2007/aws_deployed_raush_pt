@@ -217,3 +217,57 @@ class InboundCallerLookupRequest(BaseModel):
             "(message.call.customer.number). Use this field only for Swagger / manual testing."
         ),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2 — MULTI-PROVIDER BOOKING (/api/v1/v2/...)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class VisitType(str, Enum):
+    evaluation = "evaluation"
+    follow_up  = "follow_up"
+
+
+class GenderPreference(str, Enum):
+    any    = "any"
+    male   = "male"
+    female = "female"
+
+
+class CheckAvailabilityV2Request(BaseModel):
+    location: Optional[str] = Field(None, example="Laguna Niguel", description="Lead clinic label (Laguna Niguel, Dana Point, Mission Viejo, Fort Fitness - Laguna Hills). Falls back to the lead's preferred_location.")
+    service: Optional[str] = Field(None, example="Physical Therapy", description="Lead service_of_interest. Rx Massage / StretchFix / Chiropractic -> front-desk hand-off.")
+    visit_type: Optional[VisitType] = Field(VisitType.evaluation, description="evaluation (60 min, default) or follow_up (45 min)")
+    clinician_name: Optional[str] = Field(None, example="Sarah Young", description="Named clinician (fuzzy match). Leave empty for anyone / earliest.")
+    gender: Optional[GenderPreference] = Field(None, description="Clinician gender preference (from the clinician table, never guessed)")
+    date: Optional[str] = Field(None, example="2026-11-03", description="Specific day YYYY-MM-DD")
+    time: Optional[str] = Field(None, example="09:00", description="Wanted start HH:MM (24h, clinic time)")
+    date_from: Optional[str] = Field(None, example="2026-12-01", description="Range start YYYY-MM-DD (e.g. 'next month') -> first 2-3 open days")
+    date_to: Optional[str] = Field(None, example="2026-12-31", description="Range end YYYY-MM-DD")
+    part_of_day: Optional[str] = Field(None, example="morning", description="morning / afternoon / evening")
+    lead_id: Optional[str] = Field(None, description="Supabase lead UUID (fills location/service; non-bookable service marks it for front desk)")
+
+
+class CreateAppointmentV2Request(BaseModel):
+    lead_id: Optional[str] = Field(None, description="Supabase lead UUID (outbound)")
+    name: Optional[str] = Field(None, example="MPTEST Jane Doe", description="Patient first + last name (falls back to the lead)")
+    phone: Optional[str] = Field(None, example="+15555550123", description="Patient phone (falls back to the lead)")
+    location: Optional[str] = Field(None, example="Laguna Niguel", description="Clinic from the check_availability ids tag")
+    service: Optional[str] = Field(None, example="Physical Therapy", description="Lead service_of_interest")
+    visit_type: Optional[VisitType] = Field(VisitType.evaluation, description="evaluation (60) / follow_up (45)")
+    clinician_id: int = Field(..., example=3708, description="Tebra provider ID from the ids tag")
+    date: str = Field(..., example="2026-11-03", description="YYYY-MM-DD from the ids tag")
+    time: str = Field(..., example="09:00", description="HH:MM from the ids tag")
+    gender: Optional[str] = Field(None, description="Patient gender if they said it (male/female) — only used when creating a new patient")
+
+
+class CancelAppointmentV2Request(BaseModel):
+    tebra_appointment_id: Optional[str] = Field(None, example="37018", description="Tebra appointment ID")
+    appointment_id: Optional[str] = Field(None, description="Supabase appointments UUID (alternative)")
+
+
+class UpdateLeadV2Request(BaseModel):
+    lead_id: str = Field(..., description="Supabase lead UUID")
+    outcome: str = Field(..., example="do_not_call", description="do_not_call | not_interested | front_desk")
+    reason: Optional[str] = Field(None, example="asked not to be called again", description="Short reason (stored in leads.metadata)")
+    notes: Optional[str] = Field(None, description="Free-text note appended to leads.notes")

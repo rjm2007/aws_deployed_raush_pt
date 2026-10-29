@@ -18,6 +18,10 @@ All routes are `POST /api/v1/...` unless noted. Each one is also a Vapi tool use
 | | `/inbound-caller-lookup` | inbound | Find caller by phone in `leads` + upcoming `appointments` (not Tebra) |
 | | `/vapi-webhook` | Vapi server URL | End-of-call report → `call_logs`, fallback lead update |
 | `system.py` | `GET /health` | monitoring | `{"status":"ok"}` |
+| `booking_v2.py` | `/v2/check-availability` | new booking-only outbound agent | Multi-provider options (Supabase copy only): any / male / female / named clinician, date, time, range, part of day; hand-off / transfer / closed-day replies; `[ids ...]` tag for booking |
+| | `/v2/create-appointment` | new outbound agent | Validate clinician+clinic+service → engine slot check → LIVE Tebra check → patient (reuse on name+phone) → CreateAppointment (clinician, 60/45 min) → cache + `appointments` + lead → SMS (not to +1555). Idempotent (lead+clinician+start ±10 min) |
+| | `/v2/cancel-appointment` | tests / cleanup | DeleteAppointment + cache row + `appointments` cancelled. Idempotent |
+| | `/v2/update-lead` | new outbound agent | do_not_call (metadata.do_not_call) / not_interested / front_desk; never downgrades a booked lead |
 
 ## Patterns to keep
 - Parse both formats: `if "message" in body and "toolCalls" in body["message"]` → Vapi; else direct JSON. Use `coerce_vapi_tool_arguments` when arguments may be a string.

@@ -1,10 +1,41 @@
 import re
-from datetime import datetime, timezone
+from datetime import date as date_cls, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from app.core.config import CLINIC_TZ_OFFSET
+from app.core.config import CLINIC_TIMEZONE, DEFAULT_SLOT_MINUTES
 
-_LA_CLINIC = ZoneInfo("America/Los_Angeles")
+# Real IANA zone: DST is handled per date (PDT UTC-7 / PST UTC-8). No fixed offsets anywhere.
+CLINIC_TZ  = ZoneInfo(CLINIC_TIMEZONE)
+_LA_CLINIC = CLINIC_TZ
+
+
+def now_la() -> datetime:
+    """Current wall-clock time at the clinic (tz-aware)."""
+    return datetime.now(CLINIC_TZ)
+
+
+def la_to_utc(date_yyyy_mm_dd: str, h: int, mn: int) -> datetime:
+    """Clinic wall time on that date -> aware UTC datetime, using the real offset for THAT date."""
+    local_dt = datetime(int(date_yyyy_mm_dd[:4]), int(date_yyyy_mm_dd[5:7]), int(date_yyyy_mm_dd[8:10]),
+                        h, mn, 0, tzinfo=CLINIC_TZ)
+    return local_dt.astimezone(timezone.utc)
+
+
+def clinic_utc_offset_hours(date_yyyy_mm_dd: str | None = None) -> int:
+    """
+    Clinic offset from GMT in whole hours for that date (-7 in PDT, -8 in PST).
+    Used for Tebra's TimeZoneOffsetFromGMT filter. Measured at local noon so the
+    2 AM DST switch itself never matters. No date = today.
+    """
+    if date_yyyy_mm_dd:
+        try:
+            d = datetime.strptime(str(date_yyyy_mm_dd)[:10], "%Y-%m-%d")
+        except Exception:
+            d = now_la().replace(tzinfo=None)
+    else:
+        d = now_la().replace(tzinfo=None)
+    noon = datetime(d.year, d.month, d.day, 12, 0, tzinfo=CLINIC_TZ)
+    return int(noon.utcoffset().total_seconds() // 3600)
 
 
 def _minutes(h: int, mn: int) -> int:
@@ -17,7 +48,33 @@ def _format_hhmm(total_minutes: int) -> str:
     return f"{h:02d}:{mn:02d}"
 
 
-def get_location_hours(date_yyyy_mm_dd: str, location: str) -> tuple[int, int] | None:
+def closed_day_reason(date_yyyy_mm_dd: str, today: date_cls | None = None) -> str | None:
+    """
+    Why the whole clinic is closed on this date, or None.
+    - Past dates (before today in Los Angeles) can't be booked.
+    - Major holidays. ASSUMED closed: New Year's Day, July 4th, Thanksgiving, Christmas Day —
+      confirm the list with the client (VoiceFAQ only says hours can change around holidays).
+    `today` (clinic date) can be passed in for tests / the availability engine; default = now in LA.
+    """
+    try:
+        d = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").date()
+    except Exception:
+        return None
+    if d < (today or now_la().date()):
+        return "past"
+    if (d.month, d.day) == (1, 1):
+        return "New Year's Day"
+    if (d.month, d.day) == (7, 4):
+        return "the Fourth of July"
+    if (d.month, d.day) == (12, 25):
+        return "Christmas Day"
+    if d.month == 11 and d.weekday() == 3 and 22 <= d.day <= 28:  # 4th Thursday of November
+        return "Thanksgiving"
+    return None
+
+
+def get_location_hours(date_yyyy_mm_dd: str, location: str,
+                       today: date_cls | None = None) -> tuple[int, int] | None:
     """
     Returns (start_minutes, end_minutes) for the clinic's working hours on the given date,
     or None if the clinic is closed that day.
@@ -33,6 +90,10 @@ def get_location_hours(date_yyyy_mm_dd: str, location: str) -> tuple[int, int] |
     try:
         weekday = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").weekday()
     except Exception:
+        return None
+
+    # Past dates and holidays: closed everywhere
+    if closed_day_reason(date_yyyy_mm_dd, today=today):
         return None
 
     # Closed Sundays for all locations
@@ -168,13 +229,42 @@ def parse_tebra_local_start_datetime(raw: str | None) -> tuple[str, int, int] | 
 
 
 def to_utc_string(date: str, h: int, mn: int) -> str:
-    """Convert clinic local time (PDT = UTC-7) to UTC ISO string for Tebra API."""
-    local_dt = datetime(
-        int(date[:4]), int(date[5:7]), int(date[8:10]),
-        h, mn, 0, tzinfo=timezone(CLINIC_TZ_OFFSET)
-    )
-    utc_dt = local_dt.astimezone(timezone.utc)
-    return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    """Convert clinic local time to the UTC ISO string Tebra expects, using that date's real offset (DST-safe)."""
+    return la_to_utc(date, h, mn).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def parse_tebra_datetime(raw: str | None) -> datetime | None:
+    """
+    Parse a Tebra GetAppointments StartDate / EndDate to a NAIVE datetime, in whatever
+    zone the request asked for (TimeZoneOffsetFromGMT). Formats:
+      "4/17/2026 9:30:00 AM"   (normal)
+      "2026-04-17T09:30:00"    (ISO, Z ignored)
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    try:
+        if " " in s and "/" in s:
+            parts = s.split(" ")
+            if len(parts) < 3:
+                return None
+            month, day, year = (int(x) for x in parts[0].split("/"))
+            tp = parts[1].split(":")
+            h, mn = int(tp[0]), int(tp[1])
+            ampm = parts[2].upper()
+            if ampm == "PM" and h != 12:
+                h += 12
+            if ampm == "AM" and h == 12:
+                h = 0
+            return datetime(year, month, day, h, mn)
+        if "T" in s:
+            dt_part, tm_part = s.split("T", 1)
+            dp = dt_part.split("-")
+            tp = re.split(r"[:Z+.-]", tm_part)
+            return datetime(int(dp[0]), int(dp[1]), int(dp[2]), int(tp[0]), int(tp[1]))
+    except Exception:
+        return None
+    return None
 
 
 def generate_all_slots(date_yyyy_mm_dd: str, location: str) -> list[tuple[int, int]]:
@@ -195,17 +285,23 @@ def generate_all_slots(date_yyyy_mm_dd: str, location: str) -> list[tuple[int, i
 
 
 def parse_booked_slots(xml: str, target_date: str) -> set:
-    """Parse booked slots from Tebra XML.
-    Tebra returns times in CLINIC LOCAL time (PDT/PST), NOT UTC.
-    Only includes slots whose date matches target_date (YYYY-MM-DD).
-    Skips appointments with ConfirmationStatus=Cancelled so cancelled
-    slots are treated as free in availability checks."""
+    """Parse booked 30-min slot starts from Tebra GetAppointments XML.
+    Tebra returns times in the TimeZoneOffsetFromGMT we sent (clinic local for that date).
+    Only includes slots on target_date (YYYY-MM-DD).
+    Skips ConfirmationStatus=Cancelled so cancelled slots are free.
+    Blocks the booking's FULL length: EndDate if given, else AppointmentDuration, else 30 min.
+    A 60-min booking at 9:00 blocks 9:00 and 9:30; any 30-min slot that overlaps a booking is blocked."""
     booked = set()
     # Iterate per-appointment blocks so we can inspect ConfirmationStatus.
     # Fall back to loose StartDate scan only if no blocks are present.
     blocks = re.findall(r'<AppointmentData>(.*?)</AppointmentData>', xml, re.DOTALL)
     if not blocks:
         blocks = [xml]
+    try:
+        day_start = datetime.strptime(target_date, "%Y-%m-%d")
+    except Exception:
+        return booked
+    day_end = day_start + timedelta(days=1)
     for block in blocks:
         status_m = re.search(r'<ConfirmationStatus>([^<]*)</ConfirmationStatus>', block)
         status = (status_m.group(1).strip().lower() if status_m else "")
@@ -214,40 +310,29 @@ def parse_booked_slots(xml: str, target_date: str) -> set:
         sd_m = re.search(r'<StartDate>([^<]+)</StartDate>', block)
         if not sd_m:
             continue
-        raw = sd_m.group(1).strip()
-        try:
-            local_dt = None
-            if " " in raw and "/" in raw:
-                # Format: "4/2/2026 7:00:00 AM" — already local clinic time
-                parts = raw.split(" ")
-                if len(parts) >= 3:
-                    date_parts = parts[0].split("/")
-                    month, day, year = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
-                    tp   = parts[1].split(":")
-                    h    = int(tp[0])
-                    mn   = int(tp[1])
-                    ampm = parts[2].upper()
-                    if ampm == "PM" and h != 12:
-                        h += 12
-                    if ampm == "AM" and h == 12:
-                        h = 0
-                    local_dt = datetime(year, month, day, h, mn)
-            elif "T" in raw:
-                dt_part, tm_part = raw.split("T")
-                dp = dt_part.split("-")
-                tp = tm_part.replace("Z", "").split(":")
-                local_dt = datetime(int(dp[0]), int(dp[1]), int(dp[2]), int(tp[0]), int(tp[1]))
-
-            if local_dt is None:
-                continue
-
-            local_date_str = local_dt.strftime("%Y-%m-%d")
-            if local_date_str != target_date:
-                continue
-
-            booked.add((local_dt.hour, local_dt.minute))
-        except Exception:
+        start = parse_tebra_datetime(sd_m.group(1))
+        if start is None:
             continue
+
+        end = None
+        ed_m = re.search(r'<EndDate>([^<]+)</EndDate>', block)
+        if ed_m:
+            end = parse_tebra_datetime(ed_m.group(1))
+        if end is None or end <= start:
+            dur_m = re.search(r'<AppointmentDuration>\s*(\d+)', block)
+            minutes = int(dur_m.group(1)) if dur_m and int(dur_m.group(1)) > 0 else DEFAULT_SLOT_MINUTES
+            end = start + timedelta(minutes=minutes)
+
+        # Clip to the target day, then mark every 30-min grid slot that overlaps [start, end)
+        s_clip, e_clip = max(start, day_start), min(end, day_end)
+        if s_clip >= e_clip:
+            continue
+        s_min = int((s_clip - day_start).total_seconds() // 60)
+        e_min = int((e_clip - day_start).total_seconds() // 60)
+        t = (s_min // 30) * 30
+        while t < e_min:
+            booked.add((t // 60, t % 60))
+            t += 30
     return booked
 
 
