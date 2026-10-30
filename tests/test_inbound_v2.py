@@ -409,3 +409,16 @@ def test_cancel_reports_cancelled_even_if_bookkeeping_fails(monkeypatch, fake):
     assert out.startswith("CANCELLED") and OLD_TID in fake["deleted"]
     out = _call(inb.inbound_cancel_appointment_v2, {**args, "confirmed": True})   # repeat, no Supabase status
     assert out.startswith("CANCELLED") and "already" in out
+
+
+def test_webcall_test_phone_only_for_web_calls(monkeypatch):
+    from app.utils.parser import extract_vapi_caller_number_from_body as ext
+    web = {"message": {"call": {"type": "webCall"}}}
+    phone_call = {"message": {"call": {"type": "inboundPhoneCall"}}}
+    monkeypatch.delenv("WEBCALL_TEST_PHONE", raising=False)
+    assert ext(web) is None
+    monkeypatch.setenv("WEBCALL_TEST_PHONE", "+919820537790")
+    assert ext(web) == "+919820537790"
+    assert ext(phone_call) is None
+    real = {"message": {"call": {"type": "webCall", "customer": {"number": "+15555550100"}}}}
+    assert ext(real) == "+15555550100"

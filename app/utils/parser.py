@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 from fastapi.responses import JSONResponse
@@ -97,4 +98,10 @@ def extract_vapi_caller_number_from_body(body: dict | None) -> str | None:
     )
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
+
+    # TEMPORARY (testing only): Vapi dashboard web calls have no caller number; WEBCALL_TEST_PHONE stands in.
+    # Unset in .env = off. Phone calls always carry a real number and never use it.
+    test_phone = os.getenv("WEBCALL_TEST_PHONE", "").strip()
+    if test_phone and (call_obj.get("type") or top_call.get("type")) == "webCall":
+        return test_phone
     return None
