@@ -224,6 +224,13 @@ async def insert_tebra_appointment(row: dict, rid: str = "?") -> None:
                 rid, body["tebra_appointment_ref"], body.get("tebra_provider_id"), body.get("start_at"))
 
 
+async def get_tebra_appointment(raw_id, rid: str = "?") -> dict | None:
+    """One row of the calendar copy by Tebra appointment ID (or None)."""
+    rows = await _select_all("tebra_appointments",
+                             [("select", "*"), ("tebra_appointment_id", f"eq.{appointment_key(raw_id)}")], rid)
+    return rows[0] if rows else None
+
+
 async def delete_tebra_appointment(raw_id, rid: str = "?") -> int:
     """Remove one appointment from the copy (after a cancel / delete in Tebra). Returns rows removed."""
     r = await _write("DELETE", "tebra_appointments",

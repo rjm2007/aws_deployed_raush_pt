@@ -9,7 +9,7 @@
 
 from fastapi import FastAPI
 
-from app.api import availability, appointments, booking_v2, faq, leads, system
+from app.api import availability, appointments, booking_v2, booking_v2_inbound, faq, leads, system
 
 app = FastAPI(
     title="Rausch PT Tebra API",
@@ -39,3 +39,4 @@ app.include_router(leads.router,         prefix="/api/v1")
 app.include_router(faq.router,           prefix="/api/v1")
 app.include_router(system.router,        prefix="/api/v1")
 app.include_router(booking_v2.router,    prefix="/api/v1")
+app.include_router(booking_v2_inbound.router, prefix="/api/v1")

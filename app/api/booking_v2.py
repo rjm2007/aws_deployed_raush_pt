@@ -61,7 +61,7 @@ from app.utils.booking_v2_logic import (
     resolve_clinic,
     spoken_day,
 )
-from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments
+from app.utils.parser import build_vapi_response, coerce_vapi_tool_arguments, extract_vapi_caller_number_from_body
 from app.utils.time_utils import (
     closed_day_reason, format_12hr, get_location_hours, la_to_utc, now_la, parse_time_to_24hr,
 )
@@ -128,6 +128,29 @@ def _lead_id(raw) -> str | None:
         return None
 
 
+def _call_type(body) -> str:
+    msg = body.get("message") if isinstance(body, dict) and isinstance(body.get("message"), dict) else {}
+    call = msg.get("call") if isinstance(msg.get("call"), dict) else {}
+    return str(call.get("type") or "").strip()
+
+
+def _is_inbound(body, lead_id: str | None) -> bool:
+    """Inbound caller = no lead and not an outbound Vapi call (the outbound agent always has a lead)."""
+    return not lead_id and _call_type(body) != "outboundPhoneCall"
+
+
+_INBOUND_FOLLOWUP = "call update_inbound_status with crm_status manual_follow_up"
+
+
+def _inbound_wording(msg: str) -> str:
+    """Inbound agent has no lead and no transfer tool: point hand-offs at update_inbound_status instead."""
+    return (msg.replace("call update_lead with outcome front_desk", _INBOUND_FOLLOWUP)
+               .replace("The lead is already marked for front-desk follow-up.",
+                        f"Then {_INBOUND_FOLLOWUP} and note what they need.")
+               .replace("for later dates use transfer_to_front_desk",
+                        f"for later dates the front desk will call them back ({_INBOUND_FOLLOWUP})"))
+
+
 def _date_arg(raw) -> tuple[str | None, bool]:
     """-> (YYYY-MM-DD or None, bad_format)."""
     s = _clean(raw)
@@ -143,7 +166,11 @@ def _date_arg(raw) -> tuple[str | None, bool]:
     return s, False
 
 
-def _transfer_msg(when: str) -> str:
+def _transfer_msg(when: str, inbound: bool = False) -> str:
+    if inbound:
+        return (f"TOO FAR OUT: {when} is more than {AVAILABILITY_WINDOW_DAYS} days out, which I can't book. "
+                "Say: \"That's further out than I can book, so I'll have our front desk call you to set it up.\" "
+                f"Then {_INBOUND_FOLLOWUP} and note the date they want (front desk number {FRONT_DESK_PHONE}).")
     return (f"TRANSFER: {when} is more than {AVAILABILITY_WINDOW_DAYS} days out, which I can't book. "
             "Say: \"That's further out than I can book. Shall I transfer you to our front desk?\" and wait. "
             "If yes, use transfer_to_front_desk. If no, say \"No problem, our team will follow up with you shortly.\" "
@@ -207,11 +234,17 @@ def _day_closed_reason(date_s: str, clinic: dict, today: date_cls, floor: date_c
 async def check_availability_v2(request: Request):
     rid = str(uuid4())[:8]
     tool_call_id = None
+    inbound = False
     try:
-        args, tool_call_id, _ = await _parse(request)
+        args, tool_call_id, raw_body = await _parse(request)
         logger.info("[%s] ======== v2/check-availability START ======== args=%s", rid, args)
 
         lead_id = _lead_id(args.get("lead_id"))
+        inbound = _is_inbound(raw_body, lead_id)
+
+        def _r(text: str):
+            return build_vapi_response(tool_call_id, _inbound_wording(text) if inbound else text)
+
         location, service = _clean(args.get("location")), _clean(args.get("service"))
         lead = None
         if lead_id and (not location or not service):
@@ -224,7 +257,7 @@ async def check_availability_v2(request: Request):
         clinic = resolve_clinic(location, ref["clinics"])
         if not clinic:
             names = ", ".join(clinic_label(c) for c in ref["clinics"])
-            return build_vapi_response(tool_call_id, f"I couldn't tell which clinic '{location or ''}' is. Our clinics are {names}. Ask which one they prefer and call again.")
+            return _r(f"I couldn't tell which clinic '{location or ''}' is. Our clinics are {names}. Ask which one they prefer and call again.")
         label = clinic_label(clinic)
 
         service_line, ai_bookable = service_line_for(service)
@@ -234,7 +267,7 @@ async def check_availability_v2(request: Request):
                                       {"handoff_reason": f"service not AI-bookable: {service}",
                                        "handoff_at": datetime.now(timezone.utc).isoformat()}, rid)
             logger.info("[%s] v2/check-availability service not AI-bookable service=%s lead=%s", rid, service, lead_id)
-            return build_vapi_response(tool_call_id, (
+            return _r((
                 f"HANDOFF: {service} appointments are scheduled by our front desk team, not by me. Do not offer times. "
                 f"Tell the caller the front desk will call them shortly to set it up (or they can call {FRONT_DESK_PHONE}). "
                 "The lead is already marked for front-desk follow-up."))
@@ -251,11 +284,11 @@ async def check_availability_v2(request: Request):
         date_from, bad2 = _date_arg(args.get("date_from"))
         date_to, bad3 = _date_arg(args.get("date_to"))
         if bad1 or bad2 or bad3:
-            return build_vapi_response(tool_call_id, "Dates must be YYYY-MM-DD (for example 2026-11-03). Work out the exact date and call again.")
+            return _r("Dates must be YYYY-MM-DD (for example 2026-11-03). Work out the exact date and call again.")
         time_raw = _clean(args.get("time"))
         want_t = parse_time_to_24hr(time_raw) if time_raw else None
         if time_raw and not want_t:
-            return build_vapi_response(tool_call_id, "Time must be HH:MM in 24-hour clinic time (for example 14:30). Call again with that.")
+            return _r("Time must be HH:MM in 24-hour clinic time (for example 14:30). Call again with that.")
         want_min = want_t[0] * 60 + want_t[1] if want_t else None
 
         # a one-day "range" (date_from = date_to, e.g. "this Sunday") is just a day: use the date path,
@@ -267,9 +300,9 @@ async def check_availability_v2(request: Request):
         last_day = today + timedelta(days=AVAILABILITY_WINDOW_DAYS)
         floor = svc.booking_floor(today)
         if date_s and date_cls.fromisoformat(date_s) > last_day:
-            return build_vapi_response(tool_call_id, _transfer_msg(spoken_day(date_s)))
+            return _r(_transfer_msg(spoken_day(date_s), inbound))
         if date_from and date_cls.fromisoformat(date_from) > last_day:
-            return build_vapi_response(tool_call_id, _transfer_msg(f"The range starting {spoken_day(date_from)}"))
+            return _r(_transfer_msg(f"The range starting {spoken_day(date_from)}", inbound))
         if date_from and date_to and date_to < date_from:
             date_from, date_to = date_to, date_from
 
@@ -288,7 +321,7 @@ async def check_availability_v2(request: Request):
                 who = " or ".join(
                     f"{c['full_name']} ({' / '.join(clinic_label(next((k for k in ref['clinics'] if int(k['tebra_location_id']) == l), None)) for l in svc.clinics_of(ref, c['tebra_provider_id'])) or 'not bookable'})"
                     for c in m["candidates"])
-                return build_vapi_response(tool_call_id, f"ASK: '{raw_name}' could be {who}. Ask which one they mean, then call again with the full name.")
+                return _r(f"ASK: '{raw_name}' could be {who}. Ask which one they mean, then call again with the full name.")
             if m["status"] == "none":
                 notes.append(f"We don't have a clinician named {raw_name} on file. At {label}, {svc_label} is with {_names(ref, clinic_pids) or 'nobody'}.")
                 raw_name = None
@@ -322,7 +355,7 @@ async def check_availability_v2(request: Request):
                                  f"{_names(ref, pids)}. If {clinic_label(target)} doesn't work for them, the front desk can help at {FRONT_DESK_PHONE}.")
                     break
         if not provider_ids:
-            return build_vapi_response(tool_call_id, f"HANDOFF: nobody I can book does {svc_label} near {label}. Tell the caller the front desk will call them, and call update_lead with outcome front_desk.")
+            return _r(f"HANDOFF: nobody I can book does {svc_label} near {label}. Tell the caller the front desk will call them, and call update_lead with outcome front_desk.")
 
         # gender filter (named clinician wins over gender)
         use_gender = None
@@ -372,13 +405,13 @@ async def check_availability_v2(request: Request):
 
         if not slots:
             if date_from and date_to and date_cls.fromisoformat(date_to) > last_day:
-                return build_vapi_response(tool_call_id, _transfer_msg("The rest of that range"))
+                return _r(_transfer_msg("The rest of that range", inbound))
             who = _names(ref, provider_ids) if not spread else f"{svc_label} at {clinic_label(target)}"
             rng = f"between {spoken_day(d0)} and {spoken_day(d1)}" if date_from else f"in the next {AVAILABILITY_WINDOW_DAYS} days"
             msg = " ".join(notes + [f"NO OPENINGS: there are no openings with {who} {rng}."])
             msg += (" Offer to look at another clinician, or tell them the front desk will call (call update_lead with outcome front_desk)."
                     if not spread else " Tell them the front desk will call to find a time (call update_lead with outcome front_desk).")
-            return build_vapi_response(tool_call_id, msg)
+            return _r(msg)
 
         lead_txt = ""
         if date_s:
@@ -435,11 +468,12 @@ async def check_availability_v2(request: Request):
         logger.info("[%s] v2/check-availability clinic=%s target=%s service=%s visit=%s gender=%s named=%s slots=%s chosen=%s",
                     rid, label, tgt_label, service_line, visit_type, use_gender, not spread, len(slots),
                     [(s.provider_id, s.date, s.time_24) for s in chosen])
-        return build_vapi_response(tool_call_id, msg)
+        return _r(msg)
 
     except calendar_store.CalendarStoreError as e:
         logger.error("[%s] v2/check-availability calendar error: %s", rid, e)
-        return build_vapi_response(tool_call_id, "I can't check the calendar right now. Tell the caller the front desk will call them to book, and call update_lead with outcome front_desk.")
+        msg = "I can't check the calendar right now. Tell the caller the front desk will call them to book, and call update_lead with outcome front_desk."
+        return build_vapi_response(tool_call_id, _inbound_wording(msg) if inbound else msg)
     except Exception as e:
         logger.exception("[%s] Error in /v2/check-availability: %s", rid, e)
         return build_vapi_response(tool_call_id, "Sorry, I had trouble checking availability. Please try again.")
@@ -480,13 +514,19 @@ async def create_appointment_v2(request: Request):
     rid = str(uuid4())[:8]
     tool_call_id = None
     try:
-        args, tool_call_id, _ = await _parse(request)
+        args, tool_call_id, raw_body = await _parse(request)
         logger.info("[%s] ======== v2/create-appointment START ======== args=%s", rid, args)
 
         lead_id = _lead_id(args.get("lead_id"))
         lead = await svc.fetch_lead(lead_id, rid) if lead_id else None
         name = _clean(args.get("name")) or (lead or {}).get("full_name")
         phone = _clean(args.get("phone")) or (lead or {}).get("phone")
+        inbound = _is_inbound(raw_body, lead_id)
+        if inbound:   # inbound: Vapi caller ID beats the spoken number (ASR is often wrong)
+            caller = extract_vapi_caller_number_from_body(raw_body)
+            if caller:
+                phone = caller
+                logger.info("[%s] v2/create inbound — phone from Vapi caller ID", rid)
         location = _clean(args.get("location")) or (lead or {}).get("preferred_location")
         service = _clean(args.get("service")) or (lead or {}).get("service_of_interest")
         visit_type = normalize_visit_type(args.get("visit_type"))

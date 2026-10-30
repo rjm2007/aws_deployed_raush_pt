@@ -273,3 +273,33 @@ class UpdateLeadV2Request(BaseModel):
     outcome: str = Field(..., example="do_not_call", description="do_not_call | not_interested | front_desk")
     reason: Optional[str] = Field(None, example="asked not to be called again", description="Short reason (stored in leads.metadata)")
     notes: Optional[str] = Field(None, description="Free-text note appended to leads.notes")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2 — INBOUND MULTI-PROVIDER (/api/v1/v2/...). Caller phone = Vapi caller ID (phone arg only for Swagger).
+# ─────────────────────────────────────────────────────────────────────────────
+
+class InboundLookupAppointmentsV2Request(BaseModel):
+    patient_full_name: str = Field(..., example="Test Inboundmp", description="Caller's first + last name (spelled). Tebra GetPatients; patients with the caller's phone first")
+    selected_tebra_appointment_id: Optional[str] = Field(None, example="37018", description="Optional: return only this one appointment")
+    phone: Optional[str] = Field(None, example="+15555550123", description="Only for Swagger / tests; on calls the Vapi caller ID is used")
+
+
+class RescheduleAppointmentV2Request(BaseModel):
+    tebra_appointment_id: str = Field(..., example="37018", description="Old visit, from the inbound_lookup_appointments_v2 ids tag")
+    new_date: str = Field(..., example="2026-11-10", description="YYYY-MM-DD from the check_availability_v2 ids tag")
+    new_time: str = Field(..., example="09:00", description="HH:MM (24h clinic time) from the check_availability_v2 ids tag")
+    patient_full_name: Optional[str] = Field(None, example="Test Inboundmp", description="Caller's first + last name (ownership check)")
+    clinician_id: Optional[int] = Field(None, example=3114, description="Tebra provider ID from the check_availability_v2 ids tag. Omit = same clinician as the old visit")
+    location: Optional[str] = Field(None, example="Dana Point", description="Clinic from the ids tag. Omit = same clinic as the old visit")
+    visit_type: Optional[VisitType] = Field(None, description="Omit = same as the old visit (evaluation 60 / follow_up 45)")
+    service: Optional[str] = Field(None, example="Physical Therapy", description="Optional service (Rx Massage / StretchFix / Chiropractic -> front desk)")
+    confirmed: Optional[bool] = Field(False, description="Two-step: first call returns CONFIRM FIRST; call again with true after the caller's clear yes")
+    phone: Optional[str] = Field(None, description="Only for Swagger / tests; on calls the Vapi caller ID is used")
+
+
+class InboundCancelAppointmentV2Request(BaseModel):
+    tebra_appointment_id: str = Field(..., example="37018", description="Visit to cancel, from the inbound_lookup_appointments_v2 ids tag")
+    patient_full_name: Optional[str] = Field(None, example="Test Inboundmp", description="Caller's first + last name (ownership check)")
+    confirmed: Optional[bool] = Field(False, description="Two-step: first call returns CONFIRM FIRST; call again with true after the caller's clear yes")
+    phone: Optional[str] = Field(None, description="Only for Swagger / tests; on calls the Vapi caller ID is used")

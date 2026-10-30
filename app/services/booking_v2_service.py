@@ -20,6 +20,7 @@ from app.core.config import SUPABASE_URL, SUPABASE_HEADERS, V2_EARLIEST_BOOKING_
 from app.core.logger import logger
 from app.services import calendar_store
 from app.services.tebra_service import (
+    call_tebra_get_appointment,
     call_tebra_get_practice_appointments,
     create_patient_v2,
     find_patients_by_name,
@@ -94,8 +95,10 @@ def booking_floor(today: date_cls) -> date_cls:
 
 async def open_slots_for(ref: dict, clinic: dict, provider_ids: set[int], duration: int,
                          start_date: str, end_date: str, gender: str | None = None,
-                         extra_bookings: list[dict] | None = None, rid: str = "?") -> list[Slot]:
-    """Open starts for these clinicians at one clinic between two clinic dates (engine clips to the window)."""
+                         extra_bookings: list[dict] | None = None, rid: str = "?",
+                         exclude_tebra_ids=None) -> list[Slot]:
+    """Open starts for these clinicians at one clinic between two clinic dates (engine clips to the window).
+    exclude_tebra_ids: bookings to ignore (reschedule: the caller's own old visit must not block the new time)."""
     if not provider_ids:
         return []
     today = now_la().date()
@@ -111,6 +114,10 @@ async def open_slots_for(ref: dict, clinic: dict, provider_ids: set[int], durati
         calendar_store.get_tebra_appointments(start_utc, end_utc, provider_ids=provider_ids, rid=rid),
     )
     hours = [h for h in ref["hours"] if int(h["tebra_provider_id"]) in provider_ids]
+    if exclude_tebra_ids:
+        skip = {calendar_store.appointment_key(x) for x in exclude_tebra_ids}
+        bookings = [b for b in bookings if b.get("tebra_appointment_id") is None
+                    or calendar_store.appointment_key(b["tebra_appointment_id"]) not in skip]
     return open_slots(
         clinicians=ref["clinicians"], hours=hours, time_off=time_off,
         bookings=bookings + list(extra_bookings or []),
@@ -270,3 +277,94 @@ async def fetch_appointment(appointment_id: str | None = None, tebra_appointment
         return None
     rows = await _sb_get("appointments", params, rid)
     return rows[0] if rows else None
+
+
+async def fetch_appointment_by_tebra(tebra_appointment_id, rid: str = "?") -> dict | None:
+    """Newest appointments row for a Tebra ID, with the fields inbound reschedule / cancel need."""
+    rows = await _sb_get("appointments", [
+        ("tebra_appointment_id", f"eq.{tebra_appointment_id}"),
+        ("select", "id,lead_id,tebra_appointment_id,tebra_patient_id,status,appointment_date,appointment_time,"
+                   "tebra_provider_id,provider_name,location,service,visit_type,duration_minutes,"
+                   "patient_name,patient_phone,rescheduled_from_id"),
+        ("order", "created_at.desc"),
+        ("limit", "1"),
+    ], rid)
+    return rows[0] if rows else None
+
+
+async def fetch_rescheduled_child(old_appointment_id: str, rid: str = "?") -> dict | None:
+    """The appointments row created by a reschedule of old_appointment_id (idempotent replies)."""
+    rows = await _sb_get("appointments", [
+        ("rescheduled_from_id", f"eq.{old_appointment_id}"),
+        ("status", "in.(scheduled,confirmed)"),
+        ("select", "id,tebra_appointment_id,tebra_patient_id,appointment_date,appointment_time,"
+                   "tebra_provider_id,provider_name,location,visit_type"),
+        ("limit", "1"),
+    ], rid)
+    return rows[0] if rows else None
+
+
+# ─── Existing appointment (inbound reschedule / cancel / lookup) ─────────────
+
+def _utc(v) -> datetime | None:
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def appointment_details(tebra_appointment_id, la_date: str | None = None, rid: str = "?",
+                              live_cache: dict | None = None) -> dict | None:
+    """
+    Who / where / when of ONE existing Tebra appointment, for inbound reschedule, cancel and lookup.
+    Clinician comes from the Tebra resources (ResourceTypeID 1), never from GetAppointment's ProviderId
+    (that falls back to the .env default). Order: calendar copy -> LIVE practice rows for that date.
+    la_date: clinic date of the visit (needed for the live fallback). live_cache: {date: rows} per request.
+    Returns {"tebra_appointment_id", "provider_id", "location_id", "start_utc", "end_utc", "duration",
+             "status", "patient_id", "source"} or None.
+    """
+    tid = str(tebra_appointment_id).strip()
+    row = None
+    try:
+        row = await calendar_store.get_tebra_appointment(tid, rid)
+    except calendar_store.CalendarStoreError as e:
+        logger.warning("[%s] appointment_details cache read failed: %s", rid, e)
+    source = "cache"
+    if not row or not row.get("tebra_provider_id"):
+        if not la_date:
+            got = await call_tebra_get_appointment(tid, rid)
+            st = _utc((got or {}).get("StartTime"))
+            if st:
+                la_date = st.astimezone(CLINIC_TZ).date().isoformat()
+        if la_date:
+            cache = live_cache if live_cache is not None else {}
+            if la_date not in cache:
+                d = date_cls.fromisoformat(la_date)
+                res = await call_tebra_get_practice_appointments((d - timedelta(days=1)).isoformat(),
+                                                                 (d + timedelta(days=1)).isoformat(), rid=rid)
+                now = datetime.now(timezone.utc)
+                cache[la_date] = [map_row(r, now) for r in res["rows"]] if res.get("ok") else None
+            rows = cache[la_date] or []
+            key = calendar_store.appointment_key(tid)
+            live = next((r for r in rows if r["tebra_appointment_id"] == key), None)
+            if live:
+                row, source = live, "live"
+    if not row:
+        return None
+    start, end = _utc(row.get("start_at")), _utc(row.get("end_at"))
+    duration = row.get("duration_minutes") or (int((end - start).total_seconds() // 60) if start and end else None)
+    pid = row.get("tebra_patient_id")
+    return {
+        "tebra_appointment_id": tid,
+        "provider_id": int(row["tebra_provider_id"]) if row.get("tebra_provider_id") else None,
+        "location_id": int(row["tebra_location_id"]) if row.get("tebra_location_id") else None,
+        "start_utc": start, "end_utc": end, "duration": duration,
+        "status": row.get("status"),
+        "patient_id": str(pid) if pid else None,
+        "source": source,
+    }
