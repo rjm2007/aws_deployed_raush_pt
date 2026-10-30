@@ -235,6 +235,11 @@ async def check_availability_v2(request: Request):
             return build_vapi_response(tool_call_id, "Time must be HH:MM in 24-hour clinic time (for example 14:30). Call again with that.")
         want_min = want_t[0] * 60 + want_t[1] if want_t else None
 
+        # a one-day "range" (date_from = date_to, e.g. "this Sunday") is just a day: use the date path,
+        # which says why a day is closed and offers the next openings
+        if date_from and not date_s and date_to == date_from:
+            date_s, date_from, date_to = date_from, None, None
+
         today = now_la().date()
         last_day = today + timedelta(days=AVAILABILITY_WINDOW_DAYS)
         floor = svc.booking_floor(today)
@@ -317,6 +322,13 @@ async def check_availability_v2(request: Request):
             notes.append(f"There are no openings with a {gender} clinician in that range, so these are with anyone.")
             use_gender = None
             slots = await svc.open_slots_for(ref, target, provider_ids, duration, d0, d1, rid=rid)
+        # nothing in the asked range (closed days, holiday week, fully booked) -> next openings after it
+        range_empty = False
+        if not slots and date_from and d1 < last_day.isoformat():
+            nxt = (date_cls.fromisoformat(d1) + timedelta(days=1)).isoformat()
+            slots = await svc.open_slots_for(ref, target, provider_ids, duration, nxt, last_day.isoformat(),
+                                             gender=use_gender, rid=rid)
+            range_empty = bool(slots)
         if part:
             in_part = [s for s in slots if in_part_of_day(s, part)]
             if in_part:
@@ -352,6 +364,11 @@ async def check_availability_v2(request: Request):
             else:
                 chosen = pick_spread([s for s in slots if s.date > date_s] or slots, 3, spread)
                 lead_txt = _day_closed_reason(date_s, target, today, floor) + " Next openings:"
+        elif range_empty:
+            chosen = pick_spread(slots, 3, spread)
+            why = (_day_closed_reason(d0, target, today, floor) if d0 == d1
+                   else f"There are no openings between {spoken_day(d0)} and {spoken_day(d1)}.")
+            lead_txt = why + " Next openings after that:"
         elif date_from:
             chosen = _earliest_per_date(slots, 3) if spread else pick_spread(
                 [next(s for s in slots if s.date == d) for d in sorted({s.date for s in slots})[:3]], 3, False)
