@@ -62,6 +62,7 @@ from app.services.tebra_service import (
     call_tebra_delete_appointment,
     call_tebra_get_appointment,
     call_tebra_get_appointments_by_patient_id,
+    call_tebra_get_practice_appointments,
     create_appointment_in_tebra,
     find_patients_by_name,
 )
@@ -77,6 +78,8 @@ _APPT_LOCKS: dict[str, asyncio.Lock] = {}
 # old tebra id -> what the reschedule made (retry after "new created, old not yet deleted" is safe)
 _RESCHEDULED: dict[str, dict] = {}
 _MAX_PATIENTS = 3
+# tebra ids this process cancelled (repeat replies even when we have no appointments row)
+_CANCELLED: set[str] = set()
 
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
@@ -86,10 +89,22 @@ def _digits10(raw) -> str:
     return d[-10:] if len(d) >= 10 else d
 
 
-def _caller_e164(raw_body, args: dict) -> str | None:
-    """Vapi caller ID first; args.phone only when there is no caller ID (Swagger / tests)."""
-    raw = extract_vapi_caller_number_from_body(raw_body) or _clean(args.get("phone"))
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _caller_e164(raw_body, args: dict, tool_call_id=None) -> str | None:
+    """Vapi caller ID. args.phone only for direct JSON (Swagger / tests): on a Vapi tool call a spoken phone
+    must never count, or a caller with a hidden number could claim someone else's visit."""
+    raw = extract_vapi_caller_number_from_body(raw_body)
+    if not raw and tool_call_id is None:
+        raw = _clean(args.get("phone"))
     return _format_phone_e164(raw) if raw else None
+
+
+def _is_upcoming(start_utc: datetime | None) -> bool:
+    """Only visits that have not started yet may be moved or cancelled (never touch past / billed visits)."""
+    return bool(start_utc) and start_utc > _now_utc()
 
 
 def _split_name(raw) -> tuple[str, str] | None:
@@ -212,7 +227,7 @@ async def inbound_lookup_appointments_v2(request: Request):
         split = _split_name(name)
         if not split:
             return build_vapi_response(tool_call_id, "I need the caller's first and last name. Ask them to spell both, then call again.")
-        caller = _caller_e164(raw_body, args)
+        caller = _caller_e164(raw_body, args, tool_call_id)
 
         found = await find_patients_by_name(split[0], split[1], rid)
         if not found["ok"]:
@@ -291,31 +306,61 @@ def _rescheduled_msg(d: dict, idempotent: bool = False) -> str:
             f"old_tebra_id:{d['old_tebra_id']}{' repeat' if idempotent else ''}]")
 
 
-async def _delete_in_tebra(tebra_id: str, rid: str) -> bool:
-    """DeleteAppointment; when it reports failure, re-read to see if it is gone anyway."""
+async def _delete_in_tebra(tebra_id: str, rid: str, la_date: str | None = None) -> bool:
+    """DeleteAppointment; when it reports failure, check whether it is gone anyway.
+    GetAppointment returns None both for 'gone' and for a Tebra error, so a None is only trusted after the
+    practice day list (la_date) confirms the id is absent. Unknown = NOT gone (never claim a false cancel)."""
     res = await call_tebra_delete_appointment(str(tebra_id), rid)
     if res["success"]:
         return True
     still = await call_tebra_get_appointment(str(tebra_id), rid)
-    gone = still is None or not still.get("StartTime")
-    logger.info("[%s] delete %s failed (%s); still in Tebra=%s", rid, tebra_id, res.get("error"), not gone)
+    gone = False
+    if not (still and still.get("StartTime")) and la_date:
+        d = date_cls.fromisoformat(la_date)
+        day = await call_tebra_get_practice_appointments((d - timedelta(days=1)).isoformat(),
+                                                         (d + timedelta(days=1)).isoformat(), rid=rid)
+        if day.get("ok"):
+            key = calendar_store.appointment_key(tebra_id)
+            gone = all(calendar_store.appointment_key(r.get("id")) != key for r in day.get("rows") or [])
+    logger.info("[%s] delete %s failed (%s); gone anyway=%s", rid, tebra_id, res.get("error"), gone)
     return gone
 
 
-async def _finish_old(old_tid: str, sb_old: dict | None, rid: str) -> bool:
-    """Remove the old visit (Tebra, calendar copy, appointments row -> rescheduled). True when it is gone."""
-    removed = await _delete_in_tebra(old_tid, rid)
+async def _finish_old(old_tid: str, sb_old: dict | None, rid: str, la_date: str | None = None) -> bool:
+    """Remove the old visit (Tebra, calendar copy, appointments row -> rescheduled). True when it is gone.
+    Never raises: the new visit already exists, so the caller must still hear RESCHEDULED."""
+    try:
+        return await _finish_old_inner(old_tid, sb_old, rid, la_date)
+    except Exception as e:
+        logger.exception("[%s] RESCHEDULE removing old visit %s raised: %s — front desk must clear it", rid, old_tid, e)
+        return False
+
+
+async def _finish_old_inner(old_tid: str, sb_old: dict | None, rid: str, la_date: str | None) -> bool:
+    removed = await _delete_in_tebra(old_tid, rid, la_date)
     if not removed:
         logger.error("[%s] RESCHEDULE old visit %s NOT removed from Tebra — front desk must clear it", rid, old_tid)
         return False
     try:
         await calendar_store.delete_tebra_appointment(old_tid, rid)
-    except calendar_store.CalendarStoreError as e:
+    except Exception as e:
         logger.error("[%s] cache delete of old %s failed: %s", rid, old_tid, e)
-    if sb_old and sb_old.get("status") not in ("rescheduled", "cancelled"):
-        await supabase_update_appointment(sb_old["id"], {"status": "rescheduled",
-                                                         "updated_at": datetime.now(timezone.utc).isoformat()})
+    try:
+        if sb_old and sb_old.get("status") not in ("rescheduled", "cancelled"):
+            await supabase_update_appointment(sb_old["id"], {"status": "rescheduled",
+                                                             "updated_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        logger.error("[%s] appointments row %s -> rescheduled failed: %s", rid, (sb_old or {}).get("id"), e)
     return True
+
+
+def _already_moved_msg(d: dict) -> str:
+    """The old visit was already moved by an earlier reschedule, to a DIFFERENT time than asked now."""
+    when = f"{spoken_day(d['date'])} at {format_12hr(d['start_min'] // 60, d['start_min'] % 60)}"
+    old_bit = "" if d.get("old_removed", True) else " Their old time could not be removed automatically; the front desk will clear it."
+    return (f"ALREADY MOVED: that appointment was already moved to {d['provider']} on {when} at our {d['clinic']} clinic, "
+            f"so nothing new was booked.{old_bit} Tell the caller. To change it again, call inbound_lookup_appointments_v2 "
+            f"and reschedule the new appointment. [ids (do not read aloud): tebra_id:{d['tebra_id']} old_tebra_id:{d['old_tebra_id']}]")
 
 
 @router.post(
@@ -333,7 +378,7 @@ async def reschedule_appointment_v2(request: Request):
                     {k: v for k, v in args.items() if k not in ("patient_full_name", "name")})
         old_tid = _clean(args.get("tebra_appointment_id"))
         name = _clean(args.get("patient_full_name")) or _clean(args.get("name"))
-        caller = _caller_e164(raw_body, args)
+        caller = _caller_e164(raw_body, args, tool_call_id)
         date_s, bad_date = _date_arg(args.get("new_date") or args.get("date"))
         t = parse_time_to_24hr(_clean(args.get("new_time") or args.get("time")) or "")
         raw_pid = _clean(args.get("clinician_id"))
@@ -352,12 +397,17 @@ async def reschedule_appointment_v2(request: Request):
         lock = _APPT_LOCKS.setdefault(old_tid, asyncio.Lock())
         async with lock:
             # ── 1. Retry of a reschedule this process already made (new visit exists) ──
+            # Any earlier move of this old visit (same or other slot) means: never book a second new visit.
             done = _RESCHEDULED.get(old_tid)
-            if done and (done["date"], done["start_min"]) == (date_s, start_min) and (not arg_pid or arg_pid == done["pid"]):
+            if done:
                 if not done.get("old_removed"):
-                    done["old_removed"] = await _finish_old(old_tid, await svc.fetch_appointment_by_tebra(old_tid, rid), rid)
-                logger.info("[%s] v2/reschedule IDEMPOTENT (memory) old=%s new=%s", rid, old_tid, done["tebra_id"])
-                return build_vapi_response(tool_call_id, _rescheduled_msg(done, idempotent=True))
+                    done["old_removed"] = await _finish_old(old_tid, await svc.fetch_appointment_by_tebra(old_tid, rid),
+                                                            rid, done.get("old_date"))
+                if (done["date"], done["start_min"]) == (date_s, start_min) and (not arg_pid or arg_pid == done["pid"]):
+                    logger.info("[%s] v2/reschedule IDEMPOTENT (memory) old=%s new=%s", rid, old_tid, done["tebra_id"])
+                    return build_vapi_response(tool_call_id, _rescheduled_msg(done, idempotent=True))
+                logger.info("[%s] v2/reschedule ALREADY MOVED old=%s new=%s", rid, old_tid, done["tebra_id"])
+                return build_vapi_response(tool_call_id, _already_moved_msg(done))
 
             # ── 2. The old visit: must still exist and belong to the caller ──
             sb_old = await svc.fetch_appointment_by_tebra(old_tid, rid)
@@ -379,6 +429,26 @@ async def reschedule_appointment_v2(request: Request):
 
             old_start = _start_utc_of(got)
             old_parts = _la_parts(old_start)
+            if not _is_upcoming(old_start):
+                logger.info("[%s] v2/reschedule old=%s is not upcoming", rid, old_tid)
+                return build_vapi_response(tool_call_id, "NOT FOUND: that appointment isn't an upcoming one (it has already started or passed), so I can't move it. Call inbound_lookup_appointments_v2 and use an upcoming one, or offer to book a new visit.")
+
+            # An earlier reschedule (e.g. before a restart) already made the new visit but the old one is still in
+            # Tebra: finish removing it, never book a second new visit.
+            child = await svc.fetch_rescheduled_child(sb_old["id"], rid) if sb_old else None
+            if child:
+                ct = str(child.get("appointment_time") or "00:00")
+                prev = {"pid": int(child["tebra_provider_id"]) if child.get("tebra_provider_id") else None,
+                        "date": child.get("appointment_date"), "start_min": int(ct[:2]) * 60 + int(ct[3:5]),
+                        "provider": child.get("provider_name") or "the clinician", "clinic": child.get("location") or "the",
+                        "visit_label": VISIT_TYPES.get(child.get("visit_type") or "", {}).get("label", "Appointment"),
+                        "tebra_id": child.get("tebra_appointment_id"), "old_tebra_id": old_tid, "sb_id": child.get("id"),
+                        "old_date": old_parts[0] if old_parts else None}
+                prev["old_removed"] = await _finish_old(old_tid, sb_old, rid, prev["old_date"])
+                _RESCHEDULED[old_tid] = prev
+                if (prev["date"], prev["start_min"]) == (date_s, start_min) and (not arg_pid or arg_pid == prev["pid"]):
+                    return build_vapi_response(tool_call_id, _rescheduled_msg(prev, idempotent=True))
+                return build_vapi_response(tool_call_id, _already_moved_msg(prev))
             det = await svc.appointment_details(old_tid, old_parts[0] if old_parts else None, rid)
             old_pid = (det or {}).get("provider_id") or (sb_old or {}).get("tebra_provider_id")
             old_loc = (det or {}).get("location_id") or got.get("ServiceLocationId")
@@ -425,7 +495,7 @@ async def reschedule_appointment_v2(request: Request):
                     + ids_tag(alts, label, visit_type)))
 
             # ── 4. Confirm gate (keyed by the old visit + new clinician + slot) ──
-            confirm_key = ("reschedule", old_tid, pid, date_s, start_min)
+            confirm_key = ("reschedule", old_tid, pid, int(clinic["tebra_location_id"]), visit_type, date_s, start_min)
             if not _take_confirm(confirm_key, _is_true(args.get("confirmed"))):
                 old_when = (f"{spoken_day(old_parts[0])} at {format_12hr(old_parts[1] // 60, old_parts[1] % 60)}"
                             if old_parts else "current")
@@ -477,54 +547,56 @@ async def reschedule_appointment_v2(request: Request):
             _PENDING_CONFIRMS.pop(confirm_key, None)
             done = {"pid": pid, "date": date_s, "start_min": start_min, "provider": provider, "clinic": label,
                     "visit_label": vt["label"], "tebra_id": tebra_id, "old_tebra_id": old_tid, "sb_id": None,
-                    "old_removed": False}
+                    "old_removed": False, "old_date": old_parts[0] if old_parts else None}
             _RESCHEDULED[old_tid] = done
             logger.info("[%s] v2/reschedule NEW BOOKED tebra=%s patient=%s pid=%s %s %02d:%02d %smin (old=%s)",
                         rid, tebra_id, patient_id, pid, date_s, t[0], t[1], vt["minutes"], old_tid)
 
-            # ── 7. Then remove the OLD visit ──
-            done["old_removed"] = await _finish_old(old_tid, sb_old, rid)
+            # ── 7. Then remove the OLD visit (never raises) ──
+            done["old_removed"] = await _finish_old(old_tid, sb_old, rid, done["old_date"])
+            try:   # the move itself worked; bookkeeping errors must not hide that from the caller
+                # ── 8. Supabase: calendar copy + appointments row for the new visit ──
+                try:
+                    await calendar_store.insert_tebra_appointment({
+                        "tebra_appointment_id": tebra_id, "tebra_provider_id": pid,
+                        "tebra_location_id": int(clinic["tebra_location_id"]), "start_at": start_utc, "end_at": end_utc,
+                        "duration_minutes": vt["minutes"], "status": "scheduled", "appt_type": "P",
+                        "tebra_patient_id": int(patient_id) if str(patient_id).isdigit() else None, "source": "ai_booking",
+                    }, rid)
+                except calendar_store.CalendarStoreError as e:
+                    logger.error("[%s] cache insert failed (sync will catch up): %s", rid, e)
 
-            # ── 8. Supabase: calendar copy + appointments row for the new visit ──
-            try:
-                await calendar_store.insert_tebra_appointment({
-                    "tebra_appointment_id": tebra_id, "tebra_provider_id": pid,
-                    "tebra_location_id": int(clinic["tebra_location_id"]), "start_at": start_utc, "end_at": end_utc,
-                    "duration_minutes": vt["minutes"], "status": "scheduled", "appt_type": "P",
-                    "tebra_patient_id": int(patient_id) if str(patient_id).isdigit() else None, "source": "ai_booking",
-                }, rid)
-            except calendar_store.CalendarStoreError as e:
-                logger.error("[%s] cache insert failed (sync will catch up): %s", rid, e)
+                phone = (sb_old or {}).get("patient_phone") or caller
+                patient_name = name or (sb_old or {}).get("patient_name") or got.get("AppointmentName")
+                row = {
+                    "tebra_appointment_id": tebra_id, "tebra_patient_id": patient_id,
+                    "tebra_service_location_id": str(clinic["tebra_location_id"]), "tebra_reason_id": vt["reason_id"],
+                    "service": service or "Physical Therapy", "location": label,
+                    "appointment_date": date_s, "appointment_time": f"{t[0]:02d}:{t[1]:02d}",
+                    "patient_name": patient_name, "patient_phone": phone, "status": "scheduled",
+                    "practice_id": SUPABASE_PRACTICE_ID, "tebra_provider_id": pid, "provider_name": provider,
+                    "visit_type": visit_type, "duration_minutes": vt["minutes"],
+                    "end_time": f"{end_min // 60:02d}:{end_min % 60:02d}",
+                    "rescheduled_from_id": (sb_old or {}).get("id"), "lead_id": (sb_old or {}).get("lead_id"),
+                }
+                sb = await supabase_insert_appointment({k: v for k, v in row.items() if v is not None})
+                done["sb_id"] = sb.get("id") if sb else None
+                if not done["sb_id"]:
+                    logger.error("[%s] appointments insert FAILED (Tebra reschedule OK tebra=%s)", rid, tebra_id)
 
-            phone = (sb_old or {}).get("patient_phone") or caller
-            patient_name = name or (sb_old or {}).get("patient_name") or got.get("AppointmentName")
-            row = {
-                "tebra_appointment_id": tebra_id, "tebra_patient_id": patient_id,
-                "tebra_service_location_id": str(clinic["tebra_location_id"]), "tebra_reason_id": vt["reason_id"],
-                "service": service or "Physical Therapy", "location": label,
-                "appointment_date": date_s, "appointment_time": f"{t[0]:02d}:{t[1]:02d}",
-                "patient_name": patient_name, "patient_phone": phone, "status": "scheduled",
-                "practice_id": SUPABASE_PRACTICE_ID, "tebra_provider_id": pid, "provider_name": provider,
-                "visit_type": visit_type, "duration_minutes": vt["minutes"],
-                "end_time": f"{end_min // 60:02d}:{end_min % 60:02d}",
-                "rescheduled_from_id": (sb_old or {}).get("id"), "lead_id": (sb_old or {}).get("lead_id"),
-            }
-            sb = await supabase_insert_appointment({k: v for k, v in row.items() if v is not None})
-            done["sb_id"] = sb.get("id") if sb else None
-            if not done["sb_id"]:
-                logger.error("[%s] appointments insert FAILED (Tebra reschedule OK tebra=%s)", rid, tebra_id)
-
-            # ── 9. SMS (never to +1555 test numbers) ──
-            if done["sb_id"] and phone:
-                if str(phone).startswith(TEST_PHONE_PREFIXES):
-                    logger.info("[%s] SMS skipped for test number (appt=%s)", rid, done["sb_id"])
-                else:
-                    await send_appointment_sms_if_needed(
-                        rid=rid, appointment_id=done["sb_id"], notification_type="sms_appointment_rescheduled",
-                        appt={"patient_name": patient_name or "", "patient_phone": phone, "appointment_date": date_s,
-                              "appointment_time": f"{t[0]:02d}:{t[1]:02d}", "location": label,
-                              "service": f"{vt['label']} with {provider}"},
-                        lead_id=row.get("lead_id"))
+                # ── 9. SMS (never to +1555 test numbers) ──
+                if done["sb_id"] and phone:
+                    if str(phone).startswith(TEST_PHONE_PREFIXES):
+                        logger.info("[%s] SMS skipped for test number (appt=%s)", rid, done["sb_id"])
+                    else:
+                        await send_appointment_sms_if_needed(
+                            rid=rid, appointment_id=done["sb_id"], notification_type="sms_appointment_rescheduled",
+                            appt={"patient_name": patient_name or "", "patient_phone": phone, "appointment_date": date_s,
+                                  "appointment_time": f"{t[0]:02d}:{t[1]:02d}", "location": label,
+                                  "service": f"{vt['label']} with {provider}"},
+                            lead_id=row.get("lead_id"))
+            except Exception as e:
+                logger.exception("[%s] v2/reschedule bookkeeping after the move failed: %s", rid, e)
 
         return build_vapi_response(tool_call_id, _rescheduled_msg(done))
 
@@ -555,7 +627,7 @@ async def inbound_cancel_appointment_v2(request: Request):
                     args.get("tebra_appointment_id"), args.get("confirmed"))
         tid = _clean(args.get("tebra_appointment_id"))
         name = _clean(args.get("patient_full_name")) or _clean(args.get("name"))
-        caller = _caller_e164(raw_body, args)
+        caller = _caller_e164(raw_body, args, tool_call_id)
         if not tid:
             return build_vapi_response(tool_call_id, "Missing tebra_appointment_id. Call inbound_lookup_appointments_v2 first and use an id from it.")
 
@@ -564,14 +636,18 @@ async def inbound_cancel_appointment_v2(request: Request):
             sb = await svc.fetch_appointment_by_tebra(tid, rid)
             got = await call_tebra_get_appointment(tid, rid)
             if not got or not got.get("StartTime"):
-                if sb and sb.get("status") == "cancelled":
+                if tid in _CANCELLED or (sb and sb.get("status") == "cancelled"):
                     return build_vapi_response(tool_call_id, f"CANCELLED: that appointment is already cancelled. [ids (do not read aloud): tebra_id:{tid} repeat]")
                 return build_vapi_response(tool_call_id, "NOT FOUND: I can't find that appointment any more. Call inbound_lookup_appointments_v2 again.")
             if not await _owns(got.get("PatientId"), sb, caller, name, rid):
                 logger.info("[%s] v2/inbound-cancel ownership FAILED tebra=%s", rid, tid)
                 return build_vapi_response(tool_call_id, "NOT FOUND: that appointment isn't under the name and phone on this call. Ask for their first and last name, call inbound_lookup_appointments_v2, and use an id from it.")
 
-            parts = _la_parts(_start_utc_of(got))
+            start = _start_utc_of(got)
+            parts = _la_parts(start)
+            if not _is_upcoming(start):
+                logger.info("[%s] v2/inbound-cancel tebra=%s is not upcoming", rid, tid)
+                return build_vapi_response(tool_call_id, "NOT FOUND: that appointment isn't an upcoming one (it has already started or passed), so I can't cancel it. Call inbound_lookup_appointments_v2 and use an upcoming one.")
             try:
                 ref = await svc.load_reference(rid)
             except calendar_store.CalendarStoreError:
@@ -590,25 +666,29 @@ async def inbound_cancel_appointment_v2(request: Request):
                     "cancel_appointment_v2 again with the same arguments plus confirmed=true. If they'd rather move it, "
                     "use the reschedule steps instead."))
 
-            if not await _delete_in_tebra(tid, rid):
+            if not await _delete_in_tebra(tid, rid, parts[0] if parts else None):
                 return build_vapi_response(tool_call_id, "I couldn't cancel it in our system right now. Tell them the front desk will call to confirm the cancellation, and call update_inbound_status with crm_status manual_follow_up. Do not say it is cancelled.")
             _PENDING_CONFIRMS.pop(confirm_key, None)
-            try:
-                await calendar_store.delete_tebra_appointment(tid, rid)
-            except calendar_store.CalendarStoreError as e:
-                logger.error("[%s] cache delete failed: %s", rid, e)
-            now_iso = datetime.now(timezone.utc).isoformat()
-            if sb and sb.get("status") != "cancelled":
-                await supabase_update_appointment(sb["id"], {"status": "cancelled", "cancelled_at": now_iso, "updated_at": now_iso})
-                phone = sb.get("patient_phone") or caller
-                if phone and not str(phone).startswith(TEST_PHONE_PREFIXES):
-                    await send_appointment_sms_if_needed(
-                        rid=rid, appointment_id=sb["id"], notification_type="sms_appointment_cancelled",
-                        appt={"patient_name": sb.get("patient_name") or name or "", "patient_phone": phone,
-                              "appointment_date": sb.get("appointment_date") or (parts[0] if parts else ""),
-                              "appointment_time": str(sb.get("appointment_time") or "")[:5], "location": where,
-                              "service": sb.get("service") or ""},
-                        lead_id=sb.get("lead_id"))
+            _CANCELLED.add(tid)
+            try:   # it IS cancelled in Tebra now; bookkeeping errors must not hide that from the caller
+                try:
+                    await calendar_store.delete_tebra_appointment(tid, rid)
+                except Exception as e:
+                    logger.error("[%s] cache delete failed: %s", rid, e)
+                now_iso = datetime.now(timezone.utc).isoformat()
+                if sb and sb.get("status") != "cancelled":
+                    await supabase_update_appointment(sb["id"], {"status": "cancelled", "cancelled_at": now_iso, "updated_at": now_iso})
+                    phone = sb.get("patient_phone") or caller
+                    if phone and not str(phone).startswith(TEST_PHONE_PREFIXES):
+                        await send_appointment_sms_if_needed(
+                            rid=rid, appointment_id=sb["id"], notification_type="sms_appointment_cancelled",
+                            appt={"patient_name": sb.get("patient_name") or name or "", "patient_phone": phone,
+                                  "appointment_date": sb.get("appointment_date") or (parts[0] if parts else ""),
+                                  "appointment_time": str(sb.get("appointment_time") or "")[:5], "location": where,
+                                  "service": sb.get("service") or ""},
+                            lead_id=sb.get("lead_id"))
+            except Exception as e:
+                logger.exception("[%s] v2/inbound-cancel bookkeeping after the delete failed: %s", rid, e)
             logger.info("[%s] v2/inbound-cancel done tebra=%s sb=%s", rid, tid, (sb or {}).get("id"))
             return build_vapi_response(tool_call_id, (
                 f"CANCELLED: their {when} appointment with {who} at our {where} clinic is cancelled. Tell them, and ask "

@@ -26,6 +26,7 @@ REF = {
 CALLER = "+15550001111"
 OLD_TID = "40001"
 OLD_START = la_to_utc("2026-11-03", 9, 0)
+NOW = la_to_utc("2026-10-30", 12, 0)   # fixed "now" so the upcoming check does not depend on the real date
 
 
 def _open(pid, name):
@@ -61,6 +62,8 @@ def fake(monkeypatch):
           "booked": None}
     api._PENDING_CONFIRMS.clear()
     inb._RESCHEDULED.clear()
+    inb._CANCELLED.clear()
+    monkeypatch.setattr(inb, "_now_utc", lambda: NOW)
 
     async def ref(rid="?"):
         return REF
@@ -284,4 +287,125 @@ def test_cancel_confirm_then_cancel_then_idempotent(fake):
     assert fake["updates"][-1][1]["status"] == "cancelled" and fake["sms"] == []
     fake["sb"][OLD_TID]["status"] = "cancelled"
     out = _call(inb.inbound_cancel_appointment_v2, {"tebra_appointment_id": OLD_TID, "confirmed": True})
+    assert out.startswith("CANCELLED") and "already" in out
+
+
+# ─── review fixes ────────────────────────────────────────────────────────────
+
+def _fail_delete(monkeypatch, fake, raise_exc=False):
+    """Tebra DeleteAppointment fails; the visit stays in Tebra."""
+    async def delete(tid, rid="?"):
+        if raise_exc:
+            raise RuntimeError("network down")
+        return {"success": False, "error": "boom"}
+    monkeypatch.setattr(inb, "call_tebra_delete_appointment", delete)
+
+
+def _day_rows(monkeypatch, ids, ok=True):
+    async def day(d0, d1, rid="?"):
+        return {"ok": ok, "rows": [{"id": i} for i in ids]}
+    monkeypatch.setattr(inb, "call_tebra_get_practice_appointments", day)
+
+
+def test_spoken_phone_never_counts_on_a_vapi_call(fake):
+    """Hidden caller ID + a phone arg must not pass the ownership check (direct JSON still may, for Swagger)."""
+    out = _call(inb.inbound_cancel_appointment_v2, {"tebra_appointment_id": OLD_TID, "phone": CALLER}, caller=None)
+    assert out.startswith("NOT FOUND") and not fake["deleted"]
+    assert inb._caller_e164({}, {"phone": CALLER}, None) == CALLER
+    assert inb._caller_e164({"message": {}}, {"phone": CALLER}, "tool-1") is None
+
+
+def test_reschedule_again_to_other_time_never_books_a_second_visit(monkeypatch, fake):
+    _fail_delete(monkeypatch, fake)
+    _day_rows(monkeypatch, [OLD_TID])
+    _resched()
+    out = _resched(confirmed=True)
+    assert out.startswith("RESCHEDULED") and "front desk will clear it" in out and len(fake["creates"]) == 1
+    out = _resched(new_time="10:00")
+    assert out.startswith("ALREADY MOVED") and len(fake["creates"]) == 1
+    out = _resched(new_time="10:00", confirmed=True)
+    assert out.startswith("ALREADY MOVED") and len(fake["creates"]) == 1
+
+
+def test_reschedule_child_row_with_old_still_in_tebra_finishes_old(monkeypatch, fake):
+    """After a restart: our child row shows the move happened; remove the old visit, don't book again."""
+    async def child(old_id, rid="?"):
+        return {"id": "sb-new", "tebra_appointment_id": "99001", "appointment_date": "2026-11-10",
+                "appointment_time": "09:00:00", "tebra_provider_id": 3114, "provider_name": "Clay Simons",
+                "location": "Dana Point", "visit_type": "evaluation"}
+    monkeypatch.setattr(inb.svc, "fetch_rescheduled_child", child)
+    out = _resched(new_time="10:00", confirmed=True)
+    assert out.startswith("ALREADY MOVED") and not fake["creates"] and OLD_TID in fake["deleted"]
+    out = _resched(confirmed=True)
+    assert out.startswith("RESCHEDULED") and "repeat" in out and not fake["creates"]
+
+
+def test_reschedule_reports_move_even_if_old_delete_raises(monkeypatch, fake):
+    _fail_delete(monkeypatch, fake, raise_exc=True)
+    _resched()
+    out = _resched(confirmed=True)
+    assert out.startswith("RESCHEDULED") and "front desk will clear it" in out and len(fake["creates"]) == 1
+
+
+def test_reschedule_reports_move_even_if_bookkeeping_fails(monkeypatch, fake):
+    async def boom(row):
+        raise RuntimeError("supabase down")
+    monkeypatch.setattr(inb, "supabase_insert_appointment", boom)
+    _resched()
+    out = _resched(confirmed=True)
+    assert out.startswith("RESCHEDULED") and len(fake["creates"]) == 1 and OLD_TID in fake["deleted"]
+
+
+def test_past_visit_cannot_be_moved_or_cancelled(monkeypatch, fake):
+    monkeypatch.setattr(inb, "_now_utc", lambda: OLD_START)        # the visit is starting now
+    out = _resched()
+    assert out.startswith("NOT FOUND") and "upcoming" in out and not fake["creates"]
+    out = _call(inb.inbound_cancel_appointment_v2, {"tebra_appointment_id": OLD_TID, "patient_full_name": "Test Inboundmp"})
+    assert out.startswith("NOT FOUND") and "upcoming" in out and not fake["deleted"]
+
+
+def test_cancel_failed_delete_is_not_reported_as_cancelled(monkeypatch, fake):
+    """GetAppointment None can be a Tebra error: only trust 'gone' when the practice day list agrees."""
+    _fail_delete(monkeypatch, fake)
+
+    async def get_none(tid, rid="?"):
+        return None
+    args = {"tebra_appointment_id": OLD_TID, "patient_full_name": "Test Inboundmp"}
+    _call(inb.inbound_cancel_appointment_v2, args)                       # CONFIRM FIRST (visit still readable)
+    monkeypatch.setattr(inb, "call_tebra_get_appointment", get_none)
+    _day_rows(monkeypatch, [OLD_TID])                                     # still in the practice list
+    real_get = inb.call_tebra_get_appointment
+    # the route reads the visit first, so give it the visit, then None for the post-delete check
+    calls = {"n": 0}
+
+    async def get_seq(tid, rid="?"):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"AppointmentId": tid, "PatientId": "555", "ServiceLocationId": "7",
+                    "StartTime": OLD_START.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        return await real_get(tid, rid)
+    monkeypatch.setattr(inb, "call_tebra_get_appointment", get_seq)
+    out = _call(inb.inbound_cancel_appointment_v2, {**args, "confirmed": True})
+    assert out.startswith("I couldn't cancel") and not any(u[1].get("status") == "cancelled" for u in fake["updates"])
+    calls["n"] = 0
+    _day_rows(monkeypatch, ["12345"])                                     # gone from the practice list
+    out = _call(inb.inbound_cancel_appointment_v2, {**args, "confirmed": True})
+    assert out.startswith("CANCELLED")
+
+
+def test_reschedule_confirm_does_not_carry_over_to_other_visit_type(fake):
+    _resched()
+    out = _resched(visit_type="follow_up", confirmed=True)
+    assert out.startswith("CONFIRM FIRST") and not fake["creates"]
+
+
+def test_cancel_reports_cancelled_even_if_bookkeeping_fails(monkeypatch, fake):
+    async def boom(*a, **k):
+        raise RuntimeError("supabase down")
+    monkeypatch.setattr(inb, "supabase_update_appointment", boom)
+    args = {"tebra_appointment_id": OLD_TID, "patient_full_name": "Test Inboundmp"}
+    _call(inb.inbound_cancel_appointment_v2, args)
+    out = _call(inb.inbound_cancel_appointment_v2, {**args, "confirmed": True})
+    assert out.startswith("CANCELLED") and OLD_TID in fake["deleted"]
+    out = _call(inb.inbound_cancel_appointment_v2, {**args, "confirmed": True})   # repeat, no Supabase status
     assert out.startswith("CANCELLED") and "already" in out
