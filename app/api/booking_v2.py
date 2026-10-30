@@ -13,6 +13,7 @@ Machine values the model must pass back are in a trailing "[ids ...]" tag (not t
 
 import asyncio
 import re
+import time
 from datetime import date as date_cls, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -75,6 +76,26 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # One in-flight booking per (lead/phone, clinician, date): a Vapi retry waits, then hits idempotency.
 _BOOKING_LOCKS: dict[tuple, asyncio.Lock] = {}
 
+# Two-step booking (MP11): first create call only records a pending confirm; the agent must read back,
+# get a clear yes, and call again with confirmed=true. (who, clinician, date, start_min) -> monotonic time.
+_PENDING_CONFIRMS: dict[tuple, float] = {}
+CONFIRM_TTL_SECONDS = 600
+
+
+def _is_true(v) -> bool:
+    return v is True or str(v).strip().lower() in ("true", "yes", "1")
+
+
+def _take_confirm(key: tuple, confirmed: bool) -> bool:
+    """True = OK to book now. Otherwise records/refreshes the pending confirm for this exact slot."""
+    now = time.monotonic()
+    for k in [k for k, ts in _PENDING_CONFIRMS.items() if now - ts > CONFIRM_TTL_SECONDS]:
+        _PENDING_CONFIRMS.pop(k, None)
+    if confirmed and key in _PENDING_CONFIRMS:
+        return True
+    _PENDING_CONFIRMS[key] = now
+    return False
+
 
 # ─── shared parsing ──────────────────────────────────────────────────────────
 
@@ -124,7 +145,9 @@ def _date_arg(raw) -> tuple[str | None, bool]:
 
 def _transfer_msg(when: str) -> str:
     return (f"TRANSFER: {when} is more than {AVAILABILITY_WINDOW_DAYS} days out, which I can't book. "
-            f"Tell the caller you'll connect them with the front desk and use transfer_to_front_desk. "
+            "Say: \"That's further out than I can book. Shall I transfer you to our front desk?\" and wait. "
+            "If yes, use transfer_to_front_desk. If no, say \"No problem, our team will follow up with you shortly.\" "
+            "and call update_lead with outcome front_desk; don't transfer. "
             f"If the transfer isn't possible, call update_lead with outcome front_desk and tell them the front desk "
             f"will call them back (front desk number {FRONT_DESK_PHONE}).")
 
@@ -329,6 +352,17 @@ async def check_availability_v2(request: Request):
             slots = await svc.open_slots_for(ref, target, provider_ids, duration, nxt, last_day.isoformat(),
                                              gender=use_gender, rid=rid)
             range_empty = bool(slots)
+        all_slots = slots
+
+        def _why_none(d: str) -> str:
+            """Why date d has nothing to offer: only the part of day is full (MP10), or the whole day."""
+            other = [s for s in all_slots if s.date == d]
+            if part and other:
+                times = sorted({s.start_min for s in other})[:3]
+                return (f"There are no {part} openings on {spoken_day(d)} (that day is open at "
+                        f"{', '.join(format_12hr(m // 60, m % 60) for m in times)}).")
+            return _day_closed_reason(d, target, today, floor)
+
         if part:
             in_part = [s for s in slots if in_part_of_day(s, part)]
             if in_part:
@@ -356,14 +390,14 @@ async def check_availability_v2(request: Request):
                     lead_txt = f"Yes, {format_12hr(*want_t)} on {spoken_day(date_s, today)} is open with"
                 else:
                     chosen = pick_spread(_ordered_near(slots, date_s, want_min), 3, spread, far=False)
-                    reason = "" if day_slots else " " + _day_closed_reason(date_s, target, today, floor)
+                    reason = "" if day_slots else " " + _why_none(date_s)
                     lead_txt = f"{format_12hr(*want_t)} on {spoken_day(date_s, today)} isn't open.{reason} Closest options:"
             elif day_slots:
                 chosen = pick_spread(day_slots, 3, spread)
                 lead_txt = f"Openings on {spoken_day(date_s, today)}:"
             else:
                 chosen = pick_spread([s for s in slots if s.date > date_s] or slots, 3, spread)
-                lead_txt = _day_closed_reason(date_s, target, today, floor) + " Next openings:"
+                lead_txt = _why_none(date_s) + (f" Next {part} openings:" if part and any(s.date == date_s for s in all_slots) else " Next openings:")
         elif range_empty:
             chosen = pick_spread(slots, 3, spread)
             why = (_day_closed_reason(d0, target, today, floor) if d0 == d1
@@ -521,6 +555,17 @@ async def create_appointment_v2(request: Request):
                     f"NOT AVAILABLE: {format_12hr(*t)} on {spoken_day(date_s)} isn't open with {provider}. "
                     f"Alternatives: {options_sentence(alts)}. Ask which works, then book. " + ids_tag(alts, label, visit_type)))
 
+            # ── 2b. Confirm gate: nothing is booked until a second call with confirmed=true for this exact slot ──
+            confirm_key = (lead_id or e164, pid, date_s, start_min)
+            if not _take_confirm(confirm_key, _is_true(args.get("confirmed"))):
+                logger.info("[%s] v2/create CONFIRM FIRST pid=%s %s %02d:%02d confirmed_arg=%s",
+                            rid, pid, date_s, t[0], t[1], args.get("confirmed"))
+                when = f"{spoken_day(date_s)} at {format_12hr(*t)}"
+                return build_vapi_response(tool_call_id, (
+                    f"CONFIRM FIRST: not booked yet. Read it back and ask: \"That's {provider} on {when} at our {label} clinic. "
+                    f"Shall I book that?\" Then stop and wait. Only after the caller's clear yes, call create_appointment_v2 again "
+                    f"with the same arguments plus confirmed=true. If they say no or change their mind, don't book."))
+
             # ── 3. LIVE Tebra check of this clinician + slot ──
             live = await svc.live_provider_rows(pid, date_s, rid)
             if not live["ok"]:
@@ -575,6 +620,7 @@ async def create_appointment_v2(request: Request):
                                           {"handoff_reason": f"CreateAppointment failed: {str(result.get('error'))[:200]}"}, rid)
                 return build_vapi_response(tool_call_id, "I'm having a little trouble finishing the booking. Tell the caller the front desk will call them right back to confirm. Do not say it is booked.")
             tebra_id = result["appointment_id"]
+            _PENDING_CONFIRMS.pop(confirm_key, None)
             logger.info("[%s] v2/create BOOKED tebra=%s patient=%s(created=%s) pid=%s %s %02d:%02d %smin",
                         rid, tebra_id, patient_id, pat["created"], pid, date_s, t[0], t[1], vt["minutes"])
 

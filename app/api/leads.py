@@ -37,6 +37,8 @@ from app.utils.parser import (
 from app.services.twilio_service import twilio_send_sms
 from app.utils.names import clean_person_name
 from app.utils.time_utils import callback_time_to_utc_iso
+from app.utils.call_outcome import decide_lead_update, extract_call_outcome
+from app.services import booking_v2_service
 
 router = APIRouter(tags=["Leads"])
 
@@ -718,7 +720,7 @@ async def vapi_webhook(request: Request):
         call_id      = call_obj.get("id", "")
         started_at   = report.get("startedAt") or call_obj.get("startedAt", "")
         ended_at     = report.get("endedAt") or call_obj.get("endedAt", "")
-        summary      = report.get("summary", "")
+        summary      = report.get("summary") or (report.get("analysis") or {}).get("summary") or ""
 
         # Calculate duration in seconds
         duration_seconds = None
@@ -910,7 +912,7 @@ async def vapi_webhook(request: Request):
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(
                 f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
-                f"&select=id,queue_status,lead_outcome,call_attempts,notes",
+                f"&select=id,queue_status,lead_outcome,call_attempts,notes,metadata",
                 headers=SUPABASE_HEADERS,
             )
             if r.status_code != 200 or not r.json():
@@ -920,6 +922,16 @@ async def vapi_webhook(request: Request):
 
         current_qs      = lead.get("queue_status")
         current_outcome = lead.get("lead_outcome")
+
+        # ── Structured output (post-call backup; tools stay the source of truth) ──
+        call_outcome = extract_call_outcome(report)
+        decision = decide_lead_update(lead, call_outcome)
+        if call_outcome:
+            logger.info("[%s] vapi-webhook call-outcome lead_id=%s outcome=%s dnc=%s confidence=%s mode=%s",
+                        rid, lead_id, call_outcome.get("outcome"), call_outcome.get("do_not_call_requested"),
+                        call_outcome.get("confidence"), decision["mode"])
+        if decision["mismatch"]:
+            logger.warning("[%s] vapi-webhook call-outcome MISMATCH lead_id=%s %s", rid, lead_id, decision["mismatch"])
 
         # Determine call_type based on which assistant handled the call
         call_type_log = "outbound_reminder" if assistant_id == VAPI_REMINDER_ASSISTANT_ID else "outbound_new_lead"
@@ -942,6 +954,12 @@ async def vapi_webhook(request: Request):
         # If already in a terminal state, just log the call
         if current_qs in ("complete", "not_interested", "follow_up", "manual_follow_up"):
             logger.info("[%s] vapi-webhook — lead already %s, inserting call_log only", rid, current_qs)
+            if decision["mode"] == "flag":
+                old_notes = (lead.get("notes") or "").strip()
+                flag_data = dict(decision["data"])
+                flag_data["notes"] = f"{old_notes} | {decision['note']}" if old_notes else decision["note"]
+                ok = await booking_v2_service.update_lead(lead_id, flag_data, decision["metadata"], rid)
+                logger.info("[%s] vapi-webhook call-outcome do_not_call flag saved lead_id=%s ok=%s", rid, lead_id, ok)
             await _insert_call_log(
                 rid=rid,
                 lead_id=lead_id,
@@ -952,6 +970,7 @@ async def vapi_webhook(request: Request):
                 call_direction="outbound",
                 outcome="voicemail" if is_voicemail else (current_outcome or ended_reason),
                 notes=summary if summary else (vm_note if is_voicemail else None),
+                structured_output=call_outcome,
             )
             return JSONResponse(content={"ok": True})
 
@@ -970,6 +989,13 @@ async def vapi_webhook(request: Request):
             lead_outcome = "no_answer"
 
         fallback_note = f"[auto-fallback] {vm_note}" if is_voicemail else f"[auto-fallback] {ended_reason}"
+        update_metadata = None
+        if decision["mode"] == "apply":
+            queue_status = decision["data"]["queue_status"]
+            lead_outcome = decision["data"]["lead_outcome"]
+            update_metadata = decision["metadata"] or None
+        if decision["note"] and decision["mode"] in ("apply", "fallback"):
+            fallback_note = f"{fallback_note}. {decision['note']}"
         update_data = {
             "queue_status":   queue_status,
             "lead_outcome":   lead_outcome,
@@ -979,7 +1005,10 @@ async def vapi_webhook(request: Request):
             "notes": f"{fallback_note}. {summary}" if summary else fallback_note,
         }
 
-        success = await supabase_update_lead(lead_id, update_data)
+        if update_metadata:
+            success = await booking_v2_service.update_lead(lead_id, update_data, update_metadata, rid)
+        else:
+            success = await supabase_update_lead(lead_id, update_data)
         logger.info("[%s] vapi-webhook fallback update lead_id=%s status=%s outcome=%s attempts=%s success=%s",
                     rid, lead_id, queue_status, lead_outcome, new_attempts, success)
 
@@ -993,6 +1022,7 @@ async def vapi_webhook(request: Request):
             call_direction="outbound",
             outcome="voicemail" if is_voicemail else lead_outcome,
             notes=summary if summary else fallback_note,
+            structured_output=call_outcome,
         )
 
         return JSONResponse(content={"ok": True})

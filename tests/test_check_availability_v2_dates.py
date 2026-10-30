@@ -3,6 +3,7 @@ and offer the next openings (round-2 sim MP11 got 'NO OPENINGS' for date_from = 
 No network: the Supabase reference + slot search are faked."""
 import asyncio
 import json
+import sys
 from datetime import datetime
 
 from app.api import booking_v2 as api
@@ -69,3 +70,14 @@ def test_range_with_openings_unchanged(monkeypatch):
     _setup(monkeypatch)
     out = _ask({"date_from": "2026-11-01", "date_to": "2026-11-06"})
     assert out.startswith("First open days in that range:")
+
+
+def test_part_of_day_full_says_part_not_whole_day(monkeypatch):
+    # MP10: Monday morning full but Monday noon open -> "no morning openings on Monday", not "no openings on Monday"
+    monkeypatch.setattr(sys.modules[__name__], "OPEN", OPEN + [Slot(3114, "Clay Simons", "2026-11-02", 12 * 60, 60),
+                                                              Slot(3114, "Clay Simons", "2026-11-09", 8 * 60, 60)])
+    _setup(monkeypatch)
+    out = _ask({"date": "2026-11-02", "part_of_day": "morning"})
+    assert "There are no morning openings on Monday, November 2" in out
+    assert "12:00 PM" in out and "There are no openings on Monday" not in out
+    assert "Next morning openings" in out

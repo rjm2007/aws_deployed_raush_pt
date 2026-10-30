@@ -328,6 +328,7 @@ async def _insert_call_log(
     outcome: str | None = None,
     notes: str | None = None,
     appointment_id: str | None = None,
+    structured_output: dict | None = None,
 ) -> bool:
     """Insert a row into call_logs. Returns True on success."""
     try:
@@ -347,6 +348,8 @@ async def _insert_call_log(
         }
         if appointment_id:
             data["appointment_id"] = appointment_id
+        if structured_output:
+            data["structured_output"] = structured_output
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(

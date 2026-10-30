@@ -259,6 +259,8 @@ class CreateAppointmentV2Request(BaseModel):
     date: str = Field(..., example="2026-11-03", description="YYYY-MM-DD from the ids tag")
     time: str = Field(..., example="09:00", description="HH:MM from the ids tag")
     gender: Optional[str] = Field(None, description="Patient gender if they said it (male/female) — only used when creating a new patient")
+    confirmed: Optional[bool] = Field(False, description="Two-step booking: the first call (without it) returns CONFIRM FIRST; "
+                                                         "call again with true only after the caller's clear yes to the read-back")
 
 
 class CancelAppointmentV2Request(BaseModel):

@@ -99,6 +99,28 @@ def _tok_sim(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _phonetic(tok: str) -> str:
+    """Rough sound-alike key: 'danyel' / 'danielle' -> 'dnl', 'simmons' / 'simons' -> 'smns'."""
+    s = tok.lower()
+    for a, b in (("ph", "f"), ("ck", "k"), ("q", "k"), ("x", "ks"), ("z", "s")):
+        s = s.replace(a, b)
+    s = re.sub(r"c(?=[eiy])", "s", s).replace("c", "k")
+    if not s:
+        return ""
+    key = s[0] + re.sub(r"[aeiouyhw]", "", s[1:])
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
+def _sounds_like(query: list[str], name: list[str]) -> bool:
+    """First + last name: last name close (spelling or sound) and first name close enough (MP07 'Danyel Simmons')."""
+    if len(query) < 2 or len(name) < 2:
+        return False
+    qf, ql, nf, nl = query[0], query[-1], name[0], name[-1]
+    last_ok = SequenceMatcher(None, ql, nl).ratio() >= 0.88 or _phonetic(ql) == _phonetic(nl)
+    first_ok = _phonetic(qf) == _phonetic(nf) or SequenceMatcher(None, qf, nf).ratio() >= 0.6
+    return last_ok and first_ok
+
+
 def _score(query: list[str], c: dict) -> float:
     """0..1: how well the spoken tokens fit this clinician's name (or a nickname)."""
     variants = [_norm_name(c.get("full_name") or "")]
@@ -117,6 +139,8 @@ def _score(query: list[str], c: dict) -> float:
             best = max(best, 0.80 + 0.15 * (sum(sims) / len(sims)) * coverage)
         else:
             best = max(best, 0.9 * SequenceMatcher(None, " ".join(query), " ".join(name)).ratio())
+            if _sounds_like(query, name):
+                best = max(best, 0.85)
     return best
 
 

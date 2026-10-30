@@ -16,10 +16,10 @@ All routes are `POST /api/v1/...` unless noted. Each one is also a Vapi tool use
 | `leads.py` | `/update-lead-status` | outbound | Patch `leads` (queue_status, lead_outcome, notes, callback time) |
 | | `/update-inbound-status` (+ alias `/inbound-call-event`) | inbound | Upsert `inbound_calls` by Vapi call_id |
 | | `/inbound-caller-lookup` | inbound | Find caller by phone in `leads` + upcoming `appointments` (not Tebra) |
-| | `/vapi-webhook` | Vapi server URL | End-of-call report → `call_logs`, fallback lead update |
+| | `/vapi-webhook` | Vapi server URL | End-of-call report → `call_logs` (+ `structured_output` jsonb), fallback lead update. Reads Vapi structured output `rausch_outbound_call_outcome` (test agent only so far; logic in `app/utils/call_outcome.py`): lead untouched by tools + confidence ≥ 0.7 → do_not_call / not_interested / wrong_number applied, other outcomes keep the fallback with the reason in notes; lead already updated → status never changed, only a do-not-call request (≥ 0.8) sets `metadata.do_not_call`. Never books/cancels. Summary from `analysis.summary` |
 | `system.py` | `GET /health` | monitoring | `{"status":"ok"}` |
 | `booking_v2.py` | `/v2/check-availability` | new booking-only outbound agent | Multi-provider options (Supabase copy only): any / male / female / named clinician, date, time, range, part of day; hand-off / transfer / closed-day replies; `[ids ...]` tag for booking |
-| | `/v2/create-appointment` | new outbound agent | Validate clinician+clinic+service → engine slot check → LIVE Tebra check → patient (reuse on name+phone) → CreateAppointment (clinician, 60/45 min) → cache + `appointments` + lead → SMS (not to +1555). Idempotent (lead+clinician+start ±10 min) |
+| | `/v2/create-appointment` | new outbound agent | **Two-step:** first call returns `CONFIRM FIRST` (no Tebra call, pending kept in memory 10 min); books only on a second call with `confirmed=true` for the same lead+clinician+date+time. Validate clinician+clinic+service → engine slot check → confirm gate → LIVE Tebra check → patient (reuse on name+phone) → CreateAppointment (clinician, 60/45 min) → cache + `appointments` + lead → SMS (not to +1555). Idempotent (lead+clinician+start ±10 min) |
 | | `/v2/cancel-appointment` | tests / cleanup | DeleteAppointment + cache row + `appointments` cancelled. Idempotent |
 | | `/v2/update-lead` | new outbound agent | do_not_call (metadata.do_not_call) / not_interested / front_desk; never downgrades a booked lead |
 

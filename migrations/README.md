@@ -8,6 +8,7 @@ Every file is idempotent, so running it twice is safe.
 | `001_multi_provider.sql` | Creates the new tables, adds 5 nullable columns to `appointments`, grants anon/authenticated access (RLS off like the other app tables), reloads the PostgREST schema |
 | `002_seed_multi_provider.sql` | Upserts clinics, visit types, the 22 clinicians, clinician services and weekly hours |
 | `003_tebra_appointment_ref.sql` | Adds nullable `tebra_appointments.tebra_appointment_ref` (raw Tebra ID; recurring occurrences have non-numeric IDs like `5LGN`) + index on `end_at` |
+| `004_call_log_structured_output.sql` | Adds nullable `call_logs.structured_output` jsonb (Vapi structured output `rausch_outbound_call_outcome`, read by `/vapi-webhook`) |
 
 ## How to apply
 DDL needs the Postgres connection string `SUPABASE_DB_URL` from the backend `.env` (the anon REST key cannot run DDL).
@@ -19,7 +20,7 @@ import psycopg
 from dotenv import dotenv_values
 url = dotenv_values('.env')['SUPABASE_DB_URL']
 with psycopg.connect(url, autocommit=True) as c:
-    for f in ['migrations/001_multi_provider.sql', 'migrations/002_seed_multi_provider.sql', 'migrations/003_tebra_appointment_ref.sql']:
+    for f in ['migrations/001_multi_provider.sql', 'migrations/002_seed_multi_provider.sql', 'migrations/003_tebra_appointment_ref.sql', 'migrations/004_call_log_structured_output.sql']:
         c.execute(open(f).read()); print('applied', f)
 PY
 ```

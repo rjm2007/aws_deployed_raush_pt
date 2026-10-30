@@ -73,6 +73,22 @@ def test_match_ambiguous_and_tiebreak():
     assert match_clinician("Simons", CLIN)["status"] == "ambiguous"
 
 
+def test_match_sound_alike():
+    clin = CLIN + [C(5490, "Byron Samayoa")]
+    for q, pid in (("Danyel Simmons", 4138), ("Danyelle Simmons", 4138), ("Sara Yung", 3708),
+                   ("Bryon Samoya", 5490), ("Clay Simmons", 3114)):
+        m = match_clinician(q, clin)
+        assert m["status"] == "match" and m["clinician"]["tebra_provider_id"] == pid, q
+    # Clay Simmons at Dana Point (only Clay works there)
+    m = match_clinician("Clay Simmons", clin, providers_at_clinic={3114})
+    assert m["status"] == "match" and m["clinician"]["tebra_provider_id"] == 3114
+    # Simons at Dana Point -> Clay; 'dan' still asks
+    m = match_clinician("Simons", clin, providers_at_clinic={3114})
+    assert m["status"] == "match" and m["clinician"]["tebra_provider_id"] == 3114
+    assert match_clinician("dan", clin)["status"] == "ambiguous"
+    assert match_clinician("Sarah", clin, providers_at_clinic={3114})["status"] == "ambiguous"
+
+
 def test_match_none():
     assert match_clinician("Dr. Zebulon Smith", CLIN)["status"] == "none"
     assert match_clinician("", CLIN)["status"] == "none"
