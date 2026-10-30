@@ -981,7 +981,8 @@ async def vapi_webhook(request: Request):
         if ended_reason in ("customer-did-not-answer", "silence-timed-out"):
             queue_status = "in_progress" if new_attempts < 3 else "manual_follow_up"
             lead_outcome = "no_answer"
-        elif ended_reason in ("customer-ended-call", "assistant-ended-call"):
+        elif ended_reason in ("customer-ended-call", "assistant-ended-call") or "forwarded" in ended_reason:
+            # Forwarded = handed to the front desk: staff follow up, never re-dial
             queue_status = "manual_follow_up"
             lead_outcome = "manual"
         else:
