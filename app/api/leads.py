@@ -35,6 +35,7 @@ from app.utils.parser import (
     vapi_response_content,
 )
 from app.services.twilio_service import twilio_send_sms
+from app.services.appointment_sms_service import build_appointment_sms, flush_pending_for_call
 from app.utils.names import clean_person_name
 from app.utils.time_utils import callback_time_to_utc_iso
 from app.utils.call_outcome import decide_lead_update, extract_call_outcome
@@ -742,6 +743,14 @@ async def vapi_webhook(request: Request):
         logger.info("[%s] vapi-webhook end-of-call-report call_id=%s assistant=%s ended=%s lead_id=%s duration=%s",
                     rid, call_id, assistant_id, ended_reason, lead_id, duration_seconds)
 
+        # ── Appointment texts held during the call (v2 booking / reschedule / cancel) ──
+        # Sent now that the call is over, from the FINAL state of each visit (never raises).
+        if call_id:
+            try:
+                await flush_pending_for_call(call_id, rid, ended_reason=ended_reason)
+            except Exception as _fe:
+                logger.error("[%s] end-of-call pending sms flush error: %s", rid, _fe)
+
         # ── Inbound fallback persistence (does not touch outbound lead updates) ──
         # Prefer Vapi call.type == inboundPhoneCall, fallback to inbound assistant id marker.
         if is_inbound or (VAPI_INBOUND_ASSISTANT_ID and str(assistant_id).lower() == str(VAPI_INBOUND_ASSISTANT_ID).lower()):
@@ -796,7 +805,7 @@ async def vapi_webhook(request: Request):
                         appt_rows = []
                         r_appt = await client.get(
                             f"{SUPABASE_URL}/rest/v1/appointments?id=eq.{appointment_id}"
-                            f"&select=id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,tebra_appointment_id,updated_at",
+                            f"&select=id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,tebra_appointment_id,provider_name,updated_at",
                             headers=SUPABASE_HEADERS,
                         )
                         if r_appt.status_code == 200:
@@ -810,7 +819,7 @@ async def vapi_webhook(request: Request):
                             was_rescheduled = True
                             r_new = await client.get(
                                 f"{SUPABASE_URL}/rest/v1/appointments?rescheduled_from_id=eq.{appointment_id}"
-                                f"&select=id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,tebra_appointment_id,updated_at"
+                                f"&select=id,patient_name,patient_phone,appointment_date,appointment_time,location,service,status,tebra_appointment_id,provider_name,updated_at"
                                 f"&order=updated_at.desc&limit=1",
                                 headers=SUPABASE_HEADERS,
                             )
@@ -835,35 +844,17 @@ async def vapi_webhook(request: Request):
                                     notification_type = "sms_appointment_rescheduled"
                                 else:
                                     notification_type = "sms_appointment_confirmed" if status == "confirmed" else "sms_appointment_booked"
-                                sms_body = (
-                                    "RAUSCH PHYSICAL THERAPY & WELLNESS\n"
-                                    f"Your appointment has been {'rescheduled' if was_rescheduled else ('confirmed' if status == 'confirmed' else 'booked')}.\n\n"
-                                    f"Name: {patient_name}\n"
-                                    f"Location: {appt_location}\n"
-                                    f"Date: {appt_date}\n"
-                                    f"Time: {appt_time}\n"
-                                    f"Phone: {patient_phone}\n"
-                                    f"Service: {appt_service}"
-                                ).strip()
                             elif status == "cancelled":
                                 notification_type = "sms_appointment_cancelled"
-                                sms_body = (
-                                    "RAUSCH PHYSICAL THERAPY & WELLNESS\n"
-                                    "Your appointment has been cancelled.\n\n"
-                                    f"Name: {patient_name}\n"
-                                    f"Location: {appt_location}\n"
-                                    f"Date: {appt_date}\n"
-                                    f"Time: {appt_time}\n"
-                                    f"Phone: {patient_phone}\n"
-                                    f"Service: {appt_service}"
-                                ).strip()
-                            elif status == "rescheduled":
-                                # If we couldn't find a new row, we avoid sending a confusing message.
-                                notification_type = None
-                                sms_body = None
                             else:
+                                # rescheduled without a new row found, or unknown: avoid a confusing message
                                 notification_type = None
-                                sms_body = None
+                            if notification_type:
+                                sms_body = build_appointment_sms(notification_type, {
+                                    "patient_name": patient_name, "appointment_date": appt_date,
+                                    "appointment_time": appt_time, "location": appt_location,
+                                    "provider_name": appt.get("provider_name"),
+                                })
 
                             if notification_type and sms_body and patient_phone:
                                 # Dedupe: if we already sent this notification for this appointment_id, skip.

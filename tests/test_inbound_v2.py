@@ -152,7 +152,7 @@ def fake(monkeypatch):
         monkeypatch.setattr(mod, "create_appointment_in_tebra", create)
         monkeypatch.setattr(mod, "supabase_insert_appointment", insert_appt)
         monkeypatch.setattr(mod, "supabase_update_appointment", update_appt)
-        monkeypatch.setattr(mod, "send_appointment_sms_if_needed", sms)
+        monkeypatch.setattr(mod, "notify_appointment_sms", sms)
     monkeypatch.setattr(inb, "call_tebra_get_appointment", get_appt)
     monkeypatch.setattr(inb, "call_tebra_delete_appointment", delete)
     monkeypatch.setattr(inb, "find_patients_by_name", patients)

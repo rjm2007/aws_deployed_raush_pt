@@ -345,6 +345,18 @@ async def job_call_new_leads():
     logger.info("── job_call_new_leads DONE started_calls=%s ──", calls_started)
 
 
+async def job_flush_pending_appointment_sms():
+    """Safety net: appointment texts held during a Vapi call are normally sent by the end-of-call
+    webhook. If that webhook never came, send them once the newest is ~10 min old (final state)."""
+    try:
+        from app.services.appointment_sms_service import flush_stale_pending
+        n = await flush_stale_pending("sms-net")
+        if n:
+            logger.info("pending appointment sms flushed for %s call(s) (no end-of-call webhook)", n)
+    except Exception as e:
+        logger.exception("job_flush_pending_appointment_sms error: %s", e)
+
+
 async def main():
     missing = [k for k in ("SUPABASE_URL", "SUPABASE_API_KEY", "VAPI_API_KEY", "VAPI_PHONE_NUMBER_ID") if not os.getenv(k)]
     if missing:
@@ -380,6 +392,8 @@ async def main():
         )
     else:
         scheduler.add_job(job_call_new_leads, "cron", minute=LEADS_CRON_MINUTES, id="leads_cron")
+    scheduler.add_job(job_flush_pending_appointment_sms, "interval", minutes=2, id="pending_sms_net",
+                      max_instances=1, coalesce=True)
     scheduler.start()
 
     try:

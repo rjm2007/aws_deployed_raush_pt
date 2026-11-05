@@ -40,7 +40,7 @@ from app.models.requests import (
 )
 from app.services import booking_v2_service as svc
 from app.services import calendar_store
-from app.services.appointment_sms_service import send_appointment_sms_if_needed
+from app.services.appointment_sms_service import notify_appointment_sms
 from app.services.supabase_service import supabase_insert_appointment, supabase_update_appointment
 from app.services.tebra_service import (
     call_tebra_delete_appointment,
@@ -132,6 +132,15 @@ def _call_type(body) -> str:
     msg = body.get("message") if isinstance(body, dict) and isinstance(body.get("message"), dict) else {}
     call = msg.get("call") if isinstance(msg.get("call"), dict) else {}
     return str(call.get("type") or "").strip()
+
+
+def _vapi_call_id(body) -> str | None:
+    """Vapi call id of a tool-call request (None for direct JSON / Swagger → SMS is sent right away)."""
+    msg = body.get("message") if isinstance(body, dict) and isinstance(body.get("message"), dict) else {}
+    if not msg.get("toolCalls"):
+        return None
+    call = msg.get("call") if isinstance(msg.get("call"), dict) else {}
+    return _clean(call.get("id"))
 
 
 def _is_inbound(body, lead_id: str | None) -> bool:
@@ -696,17 +705,18 @@ async def create_appointment_v2(request: Request):
                                       {"booked_v2": {"tebra_appointment_id": tebra_id, "clinician_id": pid,
                                                      "date": date_s, "time": f"{t[0]:02d}:{t[1]:02d}"}}, rid)
 
-            # ── 7. Confirmation SMS (never to +1555 test numbers) ──
+            # ── 7. Confirmation SMS (never to +1555 test numbers). On a Vapi call it is held and sent
+            #       after the call ends (end-of-call webhook), using the final state of the visit. ──
             if sb_id:
                 if e164.startswith(TEST_PHONE_PREFIXES):
                     logger.info("[%s] SMS skipped for test number %s (appt=%s)", rid, e164, sb_id)
                 else:
-                    await send_appointment_sms_if_needed(
+                    await notify_appointment_sms(
                         rid=rid, appointment_id=sb_id, notification_type="sms_appointment_booked",
                         appt={"patient_name": name, "patient_phone": e164, "appointment_date": date_s,
                               "appointment_time": f"{t[0]:02d}:{t[1]:02d}", "location": label,
-                              "service": f"{vt['label']} with {provider}"},
-                        lead_id=lead_id)
+                              "service": service or "Physical Therapy", "provider_name": provider},
+                        lead_id=lead_id, vapi_call_id=_vapi_call_id(raw_body))
 
         return build_vapi_response(tool_call_id, _booked_msg(first, vt["label"], provider, date_s, start_min, label,
                                                              sb_id, tebra_id, patient_id, pat["created"]))

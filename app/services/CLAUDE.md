@@ -9,7 +9,7 @@ Parent: `../CLAUDE.md`
 | `calendar_store.py` | Supabase REST | ONLY access to clinics, clinicians, clinician_services/hours/time_off, visit_types, tebra_appointments, tebra_sync_log |
 | `tebra_sync.py` | Tebra → Supabase | `sync_window`, `sync_fast` (days 0-14), `sync_slow` (15-60), `cleanup_past`, `map_row` |
 | `twilio_service.py` | Twilio | `twilio_send_sms` (E.164 formatting) |
-| `appointment_sms_service.py` | Twilio + Supabase | Builds confirmation/cancel SMS, dedupes via `notification_log` |
+| `appointment_sms_service.py` | Twilio + Supabase | `build_appointment_sms` (friendly date/time, clinician if `provider_name`, "To reschedule or cancel, call us at +1 (877) 283-2944." — never "reply"); `send_appointment_sms_if_needed` (send now, dedupe on `notification_log` sent, never +1555); `notify_appointment_sms` (Vapi call → `notification_log` row status `pending` + `vapi_call_id`, no text yet; direct JSON → send now); `flush_pending_for_call` (end of call: claim pending → re-fetch rows → `plan_call_notifications` final state → pending row becomes `sent`/`failed`/`skipped`); `flush_stale_pending` (safety net, run by `scheduler_leads.py` every 2 min for calls whose newest pending row is >10 min old) |
 | `booking_v2_service.py` | Supabase + Tebra | v2 booking helpers: cached reference data, `open_slots_for()`, `live_provider_rows()` (live pre-booking check), `resolve_patient()` (name+phone reuse), lead/appointment REST helpers |
 
 ## Tebra rules (important)

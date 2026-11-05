@@ -53,10 +53,11 @@ from app.api.booking_v2 import (
     _is_true,
     _parse,
     _take_confirm,
+    _vapi_call_id,
 )
 from app.services import booking_v2_service as svc
 from app.services import calendar_store
-from app.services.appointment_sms_service import send_appointment_sms_if_needed
+from app.services.appointment_sms_service import notify_appointment_sms
 from app.services.supabase_service import supabase_insert_appointment, supabase_update_appointment
 from app.services.tebra_service import (
     call_tebra_delete_appointment,
@@ -589,12 +590,12 @@ async def reschedule_appointment_v2(request: Request):
                     if str(phone).startswith(TEST_PHONE_PREFIXES):
                         logger.info("[%s] SMS skipped for test number (appt=%s)", rid, done["sb_id"])
                     else:
-                        await send_appointment_sms_if_needed(
+                        await notify_appointment_sms(
                             rid=rid, appointment_id=done["sb_id"], notification_type="sms_appointment_rescheduled",
                             appt={"patient_name": patient_name or "", "patient_phone": phone, "appointment_date": date_s,
                                   "appointment_time": f"{t[0]:02d}:{t[1]:02d}", "location": label,
-                                  "service": f"{vt['label']} with {provider}"},
-                            lead_id=row.get("lead_id"))
+                                  "service": service or "Physical Therapy", "provider_name": provider},
+                            lead_id=row.get("lead_id"), vapi_call_id=_vapi_call_id(raw_body))
             except Exception as e:
                 logger.exception("[%s] v2/reschedule bookkeeping after the move failed: %s", rid, e)
 
@@ -680,13 +681,13 @@ async def inbound_cancel_appointment_v2(request: Request):
                     await supabase_update_appointment(sb["id"], {"status": "cancelled", "cancelled_at": now_iso, "updated_at": now_iso})
                     phone = sb.get("patient_phone") or caller
                     if phone and not str(phone).startswith(TEST_PHONE_PREFIXES):
-                        await send_appointment_sms_if_needed(
+                        await notify_appointment_sms(
                             rid=rid, appointment_id=sb["id"], notification_type="sms_appointment_cancelled",
                             appt={"patient_name": sb.get("patient_name") or name or "", "patient_phone": phone,
                                   "appointment_date": sb.get("appointment_date") or (parts[0] if parts else ""),
                                   "appointment_time": str(sb.get("appointment_time") or "")[:5], "location": where,
-                                  "service": sb.get("service") or ""},
-                            lead_id=sb.get("lead_id"))
+                                  "service": sb.get("service") or "", "provider_name": sb.get("provider_name") or ""},
+                            lead_id=sb.get("lead_id"), vapi_call_id=_vapi_call_id(raw_body))
             except Exception as e:
                 logger.exception("[%s] v2/inbound-cancel bookkeeping after the delete failed: %s", rid, e)
             logger.info("[%s] v2/inbound-cancel done tebra=%s sb=%s", rid, tid, (sb or {}).get("id"))

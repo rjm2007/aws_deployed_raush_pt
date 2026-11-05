@@ -76,7 +76,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(api, "create_appointment_in_tebra", create)
     monkeypatch.setattr(api.calendar_store, "insert_tebra_appointment", insert_cache)
     monkeypatch.setattr(api, "supabase_insert_appointment", insert_appt)
-    monkeypatch.setattr(api, "send_appointment_sms_if_needed", noop)
+    monkeypatch.setattr(api, "notify_appointment_sms", noop)
     return state
 
 
