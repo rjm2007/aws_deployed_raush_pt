@@ -65,6 +65,10 @@ LEADS_OFFICE_END_HOUR = int(os.getenv("LEADS_OFFICE_END_HOUR", "17"))  # exclusi
 # How many minutes after the intro SMS to trigger the outbound call (default 10)
 SMS_TO_CALL_DELAY_MINUTES = int(os.getenv("LEADS_SMS_TO_CALL_DELAY_MINUTES", "10"))
 
+# Leave brand-new leads alone this long so scheduler_leads_sms can send the intro text first
+# (it moves them to message_sent). After this, a still-"new" lead is called anyway (SMS off/failed).
+NEW_LEAD_SMS_GRACE_SECONDS = int(os.getenv("LEADS_NEW_LEAD_SMS_GRACE_SECONDS", "60"))
+
 
 def _setup_logger() -> logging.Logger:
     os.makedirs("logs", exist_ok=True)
@@ -253,7 +257,17 @@ async def job_call_new_leads():
     )
 
     leads: list[dict] = []
-    leads.extend(new_leads or [])
+
+    # new leads: skip ones younger than the grace window so the intro SMS goes out before the call
+    new_cutoff = now_utc() - timedelta(seconds=NEW_LEAD_SMS_GRACE_SECONDS)
+    for l in (new_leads or []):
+        ts = l.get("created_at") or ""
+        try:
+            created = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None
+        except Exception:
+            created = None
+        if created is None or created <= new_cutoff:
+            leads.append(l)
 
     # stale retry filter
     cutoff = now_utc() - timedelta(minutes=MIN_RETRY_AGE_MINUTES)
