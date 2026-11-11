@@ -20,7 +20,7 @@ _FALLBACK_OUTCOMES = ("voicemail", "someone_else_answered", "callback_requested"
 def extract_call_outcome(report: dict) -> dict | None:
     """Our structured output result from an end-of-call report (message.artifact.structuredOutputs), or None."""
     outputs = ((report or {}).get("artifact") or {}).get("structuredOutputs") \
-        or ((report or {}).get("call") or {}).get("artifact", {}).get("structuredOutputs") or {}
+        or (((report or {}).get("call") or {}).get("artifact") or {}).get("structuredOutputs") or {}
     if not isinstance(outputs, dict):
         return None
     for entry in outputs.values():
